@@ -1,0 +1,53 @@
+{
+  "name": "circuitforge",
+  "version": "1.0.0",
+  "description": "CircuitForge — advanced electronic circuit design, simulation, synthesis and optimization laboratory.",
+  "type": "module",
+  "license": "MIT",
+  "author": "Yannis Schmidt",
+  "engines": {
+    "node": ">=20.0.0"
+  },
+  "main": "dist/engine/index.js",
+  "exports": {
+    ".": "./dist/engine/index.js",
+    "./*": "./dist/engine/*.js"
+  },
+  "bin": {
+    "circuitforge": "bin/circuitforge.js"
+  },
+  "files": [
+    "dist",
+    "public",
+    "bin",
+    "docs",
+    "examples"
+  ],
+  "scripts": {
+    "build": "tsc -p tsconfig.json",
+    "watch": "tsc -p tsconfig.json --watch",
+    "start": "node bin/circuitforge.js start",
+    "serve": "node bin/circuitforge.js serve",
+    "cli": "node bin/circuitforge.js",
+    "test": "tsc -p tsconfig.test.json && node dist-test/tests/run.js",
+    "test:fast": "node dist-test/tests/run.js",
+    "bench": "npm run build && node bin/circuitforge.js benchmark --suite full",
+    "examples": "npm run build && node bin/circuitforge.js examples --write examples",
+    "check": "tsc -p tsconfig.json --noEmit",
+    "check:test": "tsc -p tsconfig.test.json --noEmit"
+  },
+  "keywords": [
+    "EDA",
+    "SPICE",
+    "circuit",
+    "simulation",
+    "synthesis",
+    "optimization",
+    "verilog",
+    "logic"
+  ],
+  "devDependencies": {
+    "@types/node": "^26.6.4",
+    "typescript": "^5.6.3"
+  }
+}

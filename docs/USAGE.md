@@ -1,164 +1,211 @@
-# CircuitForge User Guide
+# Usage
 
-This guide walks you through the most common tasks.
-
-## 1. Build a circuit
-
-The core API gives you full programmatic control over the graph.
-
-```python
-from circuitforge.core import build_circuit, add_component, connect
-from circuitforge.sim.logic import register_logic_components_in_library
-
-c = build_circuit("my_circuit")
-register_logic_components_in_library(c.library)
-
-# Add components
-a = add_component(c, "LOGIC_INPUT", reference="A")
-b = add_component(c, "LOGIC_INPUT", reference="B")
-g = add_component(c, "AND", reference="G")
-o = add_component(c, "LOGIC_OUTPUT", reference="O")
-
-# Connect them
-connect(c, a.ports[0], g.ports[0])
-connect(c, b.ports[0], g.ports[1])
-connect(c, g.ports[2], o.ports[0])
-```
-
-## 2. Run a logic simulation
-
-```python
-from circuitforge.sim.logic import simulate_logic, LogicState
-
-result = simulate_logic(c, {"A": LogicState(1), "B": LogicState(0)})
-print(result.net_states)  # {net_id: LogicState}
-```
-
-The simulator is event-driven and converges to a fixed point in at most
-`max_iterations` ticks. It supports 4 logic states: `0`, `1`, `X`, `Z`.
-
-## 3. Run an electrical simulation
-
-```python
-from circuitforge.sim.electrical import simulate_electrical, ElectricalSimOptions
-
-opts = ElectricalSimOptions(t_start=0, t_stop=1e-6, dt=1e-9, max_newton=20)
-result = simulate_electrical(c, opts)
-```
-
-The electrical simulator uses Modified Nodal Analysis (MNA) with
-Newton-Raphson for non-linear devices. Capacitors and inductors use
-Backward Euler for stability.
-
-## 4. Run a thermal simulation
-
-```python
-from circuitforge.thermal import default_thermal_for_circuit, run_thermal
-
-net = default_thermal_for_circuit(c)
-powers = {cid: 0.1 for cid in net.nodes}  # 100 mW per component
-series = [(0, powers), (1, powers), (2, powers)]  # 3 timesteps
-result = run_thermal(net, series, t_stop=2, dt=0.1)
-print(result.t_max)  # max temperature reached
-```
-
-## 5. Save and load a project
-
-```python
-from circuitforge.io.serialize import project_to_json, project_from_json
-
-s = project_to_json(c)  # JSON string
-c2 = project_from_json(s)  # round-trip
-```
-
-The schema is versioned; loading a project from a newer schema raises
-`SchemaError`.
-
-## 6. Auto-design
-
-```python
-from circuitforge.optim.specification import AutoDesignSpec
-from circuitforge.optim.synthesizer import auto_design
-from circuitforge.optim.search import SearchConfig
-
-spec = AutoDesignSpec(
-    category="ADDER",
-    description="4-bit adder",
-    parameters={"n_bits": 4},
-    target_operations=[],
-    optimization_profile="balanced",
-)
-cfg = SearchConfig(population_size=32, n_generations=20, time_budget_s=30)
-cand = auto_design(spec, cfg)
-print(f"Best candidate: {cand.fingerprint}")
-print(f"  components: {cand.evaluation.n_components}")
-print(f"  score:      {cand.evaluation.score}")
-```
-
-The search is reproducible: same seed + same config always produces the
-same best candidate.
-
-## 7. Validate a circuit
-
-```python
-from circuitforge.validation import (
-    validate_logic, validate_electrical, validate_thermal, validate_timing,
-)
-
-# Validate against a golden function
-def golden(v):
-    a, b = v[0], v[1]
-    return [a & b]
-
-rep = validate_logic(c, golden, exhaustive=True)
-print(rep.summary())  # passed/failed/skipped
-```
-
-## 8. Use virtual instruments
-
-```python
-from circuitforge.instruments import VMM1, TINY_OSC, FND2
-
-vmm = VMM1()
-for i in range(100):
-    vmm.sample("VOUT", i * 0.001, 3.3)
-m = vmm.read("VOUT")
-print(m.summary())  # VMM-1(VOUT) = 3.3 V
-```
-
-## 9. Detect repeated subcircuits
-
-```python
-from circuitforge.patterns import find_repeated_patterns
-
-patterns = find_repeated_patterns(c)
-for p in patterns:
-    print(p.summary())  # Pattern (AND|OR): 4 occurrences, 3 components each
-```
-
-## 10. Use the CLI
+Task-oriented recipes. The graphical editor is described in
+[USER_GUIDE.md](USER_GUIDE.md); this file is the command line and the module API.
 
 ```bash
-python -m circuitforge.cli info my_project.json
-python -m circuitforge.cli simulate my_project.json --logic
-python -m circuitforge.cli auto-design --category adder --bits 4
-python -m circuitforge.cli benchmark --output bench.json
-python -m circuitforge.cli gpu-info
+npm install && npm start          # the laboratory, on http://localhost:8080
+node bin/circuitforge.js help     # every verb
 ```
 
-## 11. Use the GUI
+## Check the installation
 
 ```bash
-python -m circuitforge.gui
+circuitforge doctor               # 15 self-checks
+circuitforge doctor --full        # … plus all 24 worked examples against their stated readings
+circuitforge version
+circuitforge about
 ```
 
-The GUI lets you open a JSON project, simulate it, validate it, and save
-changes. A full schematic editor is on the roadmap.
+`doctor` verifies the runtime, the build, the library (53 models, each with a model card and
+an accuracy class), the reference chip library, a DC solve against a hand-derived value
+(a 12 V divider across 1 kΩ and 2 kΩ gives 7.999999995 V and 48 mW), a transient sweep with
+an FFT against closed-form values (an RC low-pass at 1 kHz gives |H| 0.8545 and −32.24°),
+that the transient record covers the window requested, level-0 logic (a full adder is 8 of 8),
+hierarchy flattening (CPU8 → 375 elements, depth 4), serialisation round trip, the optimizer,
+and the profiler.
 
-## 12. Reproducibility and accuracy
+## See what is available
 
-All simulations, optimizations, and benchmarks are deterministic given
-the same seed, parameters, and engine version. Every "best" result is
-qualified with the search constraints, the candidate count, the
-simulation level, and the ranking criteria. See `docs/SPEC.md` section
-33 for details.
+```bash
+circuitforge list                       # component types, pins, parameters, accuracy
+circuitforge list --category semiconductor
+circuitforge examples                   # the 24 worked examples
+circuitforge examples --check           # run them and compare every declared reading
+circuitforge examples --write examples  # write each example's artefacts to a directory
+```
+
+## Simulate
+
+```bash
+circuitforge simulate --chip full_adder --level 0
+circuitforge simulate --chip ripple_adder --param bits=8 --level 0 --vectors 64
+circuitforge simulate --example voltage_divider --level 1
+circuitforge simulate --example rc_lowpass --level 1 --tstop 0.06
+circuitforge simulate --chip cpu8 --level 0 --json
+```
+
+Level 0 prints the truth table and the settled value of every output; level 1 prints the DC
+operating point with its convergence (iterations, worst voltage error, gmin used, singularity)
+and the signed power of every element; level 3 adds the thermal steady state. A solve that did
+not converge says so.
+
+## Analyze
+
+```bash
+circuitforge analyze --chip cpu8
+circuitforge analyze --chip alu_n --param bits=4 --verbose
+```
+
+Prints the summary, the critical path with its gate chain and the timing model named, fan-out
+statistics, zones, and every finding with its code. A 0 ns critical path is labelled a lower
+bound when the elements declare no delay.
+
+## Mine
+
+```bash
+circuitforge mine --chip ripple_adder --param bits=8     # what does this design repeat?
+circuitforge mine --file sheet.cfproj                    # the same, for a saved sheet
+circuitforge mine --file sheet.cfproj --replace --out rewritten.json
+circuitforge mine --file sheet.cfproj --extract --out reusable.cfproj
+circuitforge mine --file sheet.cfproj --extract --replace --out compact.cfproj
+circuitforge mine --example alu --min 4 --max-inputs 4 --json
+```
+
+Prints every block the sheet repeats: its shape, how many times it occurs, how many of those
+occurrences are on this sheet, its measured truth table, and the library chip that computes the
+same thing — `IDENTICAL` when every measured row agrees, or the number of rows that differ.
+`--replace` substitutes the identical matches and, with `--out`, writes the rewritten sheet as a
+circuit document; occurrences inside a chip expansion are skipped with the reason, because they
+belong to another sheet. A near match is never substituted. `--extract` copies one on-sheet
+occurrence to a new chip, promotes its boundary nets to ports, checks ERC, and exhaustively
+re-measures the copy **before** registering it. With `--out`, it writes a full `.cfproj` containing
+the chip and the original sheet; combining `--extract --replace --out` stores both the new chip
+and the rewritten sheet in that project. The extracted chip is fixed (its component parameters
+are not guessed into a new parameter schema). `--json` outputs the report, measurements,
+`ChipDocument` and implementation instead of writing a project file.
+
+| Flag | Meaning |
+|---|---|
+| `--min N` | report a block only from N occurrences (2; 1 lists blocks worth chipping) |
+| `--depth N` | fan-in cone depth that defines a block (3) |
+| `--max-inputs N` | widest cone to consider, in external inputs (5) |
+| `--max-size N` | most elements in one block (12) |
+| `--max N` | cap on blocks reported, best first (24) |
+| `--pattern ID` | which block `--replace` or `--extract` acts on |
+| `--extract` | create and register a verified fixed chip from one on-sheet occurrence |
+| `--name NAME` | display name for the extracted chip |
+| `--occurrence N` | choose a zero-based occurrence to copy (default: first on this sheet) |
+| `--chip ID` | select a chip implementation as the circuit to mine |
+| `--as-chip ID` | id for the newly extracted chip |
+| `--replace-with ID` | choose an existing replacement chip; it must still match the pattern row for row |
+| `--limit N` | replace at most N occurrences |
+| `--out FILE` | write a circuit document for replacement, or a full project when extracting |
+| `--no-measure` | skip truth-table measurement and therefore chip matching (a match is measured behaviour) |
+| `--no-match` | measure the table, but skip comparing it with the chip library |
+
+## Validate
+
+```bash
+circuitforge validate --chip ripple_adder --spec adder --param bits=4
+circuitforge validate --chip mux4 --spec mux --param width=4 --param selectBits=2
+```
+
+Reports pass/fail/skip counts per level (logic, electrical, timing, thermal, power, edge
+cases, random vectors, stability), the fingerprint of what was validated, and the accuracy
+classes of the models used. A 4-bit ripple adder against the adder contract: 22 passed, 0
+failed, 2 skipped, 512 contract vectors, 12 of 12 edge cases, 200 random vectors, DC converged
+over 29 nodes, power balance 0 W.
+
+## Optimize and synthesize
+
+```bash
+circuitforge optimize --spec and_not --profile FASTEST --budget 400 --why
+circuitforge optimize --spec mux --param selectBits=2 --profile SMALLEST --budget 400 --json
+circuitforge synth    --spec adder --param bits=4 --profile BALANCED --budget 600
+```
+
+`--why` prints the measured deltas against the runner-up and nothing else. `synth` runs the
+whole reverse-engineering path and saves the result as a validated chip. Every result is
+reported as *best found under current constraints*, with the specification, profile, budget,
+population, seed and tiers attached.
+
+## Export
+
+```bash
+circuitforge export --chip cpu8 --format spice   --out cpu8.cir
+circuitforge export --chip cpu8 --format json    --out cpu8.cfcircuit.json
+circuitforge export --chip cpu8 --format bom     --out cpu8.bom.json
+circuitforge export --chip cpu8 --format schematic --level flattened --out cpu8.flat.json
+circuitforge export --chip cpu8 --format svg     --out cpu8.svg
+```
+
+Formats: `spice`, `json`, `bom`, `schematic` (at `hierarchical`, `flattened` or `electrical`
+level), `svg`. The SPICE file carries the engine version and the netlist fingerprint in its
+header.
+
+## Benchmark
+
+```bash
+circuitforge benchmark --suite quick
+circuitforge benchmark --suite full --repeats 2
+circuitforge benchmark --suite scaling --size 1000 --size 10000 --size 100000
+circuitforge benchmark --suite stress --json --quiet
+```
+
+See [BENCHMARKS.md](BENCHMARKS.md) for the method, the reference numbers and what the suite
+refuses to claim.
+
+## Jobs
+
+```bash
+circuitforge jobs                                  # queue state
+circuitforge jobs --enqueue optimize --spec mux --budget 2000
+circuitforge jobs --pause <id> | --resume <id> | --cancel <id>
+circuitforge jobs --history
+```
+
+After a crash the CLI reports `Previous job detected… Resume? [Y/N]` and resumes from the
+checkpoint on disk.
+
+## As a module
+
+```js
+import * as cf from 'circuitforge';
+
+const project = cf.buildReferenceProject('demo');
+const circuit = project.chips.get('ripple_adder').implementation({ bits: 4 });
+
+// level 0
+const nl = cf.flatten(circuit, project.lib, project.chips, { metadata: true });
+const graph = cf.buildLogicGraph(nl);
+const sim = new cf.LogicVectorSim(graph);
+const a = graph.inputs.map((n) => graph.netName(n));
+sim.drive(graph.inputs[0], 1, 0);      // node index, not name
+sim.settle();
+console.log(a, graph.outputs.map((n) => sim.word(n)));
+
+// level 1
+const solver = new cf.CircuitSimulator(nl, { ambient: 25 });
+const dc = solver.dcSolve({ quiet: true });
+console.log(dc.converged, dc.iterations, dc.worstVoltageError);
+
+// a picture of it
+const { svg } = cf.render.renderCircuitToSvg(circuit, project.lib, project.chips, {
+  viewport: { width: 1200, height: 800 },
+});
+```
+
+## Conventions worth knowing
+
+- Gate pins are `IN1…IN16` and `OUT`; a gate instance declares how many inputs it uses with
+  the `inputs` parameter, and the rest are not drawn or exported.
+- A DFF is `[D, CLK, RST, Q, QN]`; a mux `[I0…, S0…, Y]`; a demux or decoder
+  `[IN, EN, S0…, Y0…]`; R and C are `1` and `2`; `vdc` is `+` and `-` with the parameter
+  `dc`; a diode is `A` and `K`; meters are `+` and `-`, a wattmeter `V+ V- I+ I-`.
+- Primitive ids: `and_gate`, `or_gate`, `xor_gate`, `nand_gate`, `nor_gate`, `xnor_gate`,
+  `not_gate`, `buffer`, `tristate`, `dff`, `dlatch`, `mux`, `demux`, `logic_high`,
+  `logic_low`, `resistor`, `capacitor`, `inductor`, `vdc`, `ground`, `voltmeter`, `ammeter`,
+  `thermometer`, `diode`, `led`, `nmos`, `pmos`.
+- Reference chip nets are lowercase (`full_adder`: `a`, `b`, `ci`, `s`, `co`) while its chip
+  ports are uppercase (`A`, `B`, `CI`, `S`, `CO`).
