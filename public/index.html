@@ -1,0 +1,105 @@
+<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="utf-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1" />
+    <title>CircuitForge — electronic circuit laboratory</title>
+    <meta
+      name="description"
+      content="Design, simulate, synthesize and optimize electronic circuits: unlimited hierarchy, four simulation levels with declared accuracy, multi-objective synthesis, and a job queue that survives a crash."
+    />
+    <link rel="stylesheet" href="/styles.css" />
+    <link rel="icon" href="/favicon.svg" type="image/svg+xml" />
+  </head>
+  <body>
+    <div id="app">
+      <!-- Menus are rendered from the engine's own command registry, so a menu item
+           cannot exist without a command behind it. -->
+      <header id="menubar">
+        <div id="brand"><span class="mark"></span>CircuitForge <small id="brand-version">…</small></div>
+        <nav id="menus"></nav>
+        <div class="spacer"></div>
+        <span class="engine-badge" id="engine-badge">engine …</span>
+      </header>
+
+      <div id="toolbar">
+        <div class="tgroup" id="tb-file"></div>
+        <div class="tsep"></div>
+        <div class="tgroup" id="tb-edit"></div>
+        <div class="tsep"></div>
+        <div class="tgroup" id="tb-sim"></div>
+        <div class="tsep"></div>
+        <div class="tgroup" id="tb-view"></div>
+        <div class="tsep"></div>
+        <div id="breadcrumb"></div>
+        <div class="spacer"></div>
+        <div class="tgroup" id="tb-level"></div>
+      </div>
+
+      <main id="workspace">
+        <aside class="panel" id="left">
+          <div class="panel-tabs" id="left-tabs"></div>
+          <div class="panel-search"><input id="palette-search" type="search" placeholder="Search components, chips, examples…" spellcheck="false" /></div>
+          <div class="panel-body flush" id="left-body"></div>
+        </aside>
+
+        <section id="sheet">
+          <canvas id="canvas"></canvas>
+          <div id="hud"></div>
+          <div id="hint"></div>
+          <div id="tooltip"></div>
+        </section>
+
+        <aside class="panel" id="right">
+          <div class="panel-tabs" id="right-tabs"></div>
+          <div class="panel-body" id="right-body"></div>
+        </aside>
+      </main>
+
+      <footer id="dock">
+        <div id="dock-tabs">
+          <div class="dock-tab" data-pane="simulation">Simulation <span class="dot"></span></div>
+          <div class="dock-tab" data-pane="scope">Oscilloscope <span class="dot"></span></div>
+          <div class="dock-tab" data-pane="analysis">Analysis <span class="dot"></span></div>
+          <div class="dock-tab" data-pane="jobs">Jobs <span class="dot"></span></div>
+          <div class="dock-tab" data-pane="console">Console <span class="dot"></span></div>
+          <div class="spacer"></div>
+          <div id="dock-actions"></div>
+        </div>
+        <div id="dock-body">
+          <div class="dock-pane" id="pane-simulation"></div>
+          <div class="dock-pane" id="pane-scope">
+            <div id="scope-wrap">
+              <div id="scope-toolbar"></div>
+              <canvas id="scope-canvas"></canvas>
+              <div id="scope-readout"></div>
+            </div>
+          </div>
+          <div class="dock-pane" id="pane-analysis"></div>
+          <div class="dock-pane" id="pane-jobs"></div>
+          <div class="dock-pane" id="pane-console"></div>
+        </div>
+      </footer>
+
+      <div id="statusbar">
+        <div class="item"><span class="dot" id="st-dot"></span><b id="st-state">idle</b></div>
+        <div class="item" id="st-sheet">—</div>
+        <div class="spacer"></div>
+        <div class="item" id="st-accuracy">accuracy —</div>
+        <div class="item" id="st-zoom">zoom —</div>
+        <div class="item" id="st-cursor">x — y —</div>
+        <div class="item" id="st-engine">engine —</div>
+      </div>
+    </div>
+
+    <div id="modal-root"></div>
+
+    <!--
+      The editor imports the compiled engine as ES modules: the same code the CLI
+      runs, so what is on screen is what the engine computed. No bundler, no build
+      step for the interface, and no second implementation of the logic to keep in
+      step with the first.
+    -->
+    <script type="module" src="/app.js"></script>
+  </body>
+</html>
