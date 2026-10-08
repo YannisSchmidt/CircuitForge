@@ -20,10 +20,20 @@
  *      two cones are the same pattern when their canonical forms match: the colour of
  *      every element in the cone plus which slot of which other cone element feeds
  *      each input, with inputs from outside numbered in a deterministic order.
- *   4. Cones are then *merged* when two roots read exactly the same external nets:
- *      that is what turns a carry cone and a sum cone, which share a, b and ci, into
- *      one three-input two-output pattern — the full adder — instead of reporting two
- *      half patterns that no chip corresponds to.
+ *   4. Cones are then *merged* when two roots read exactly the same external nets,
+ *      which is how a carry cone and a sum cone over a, b and ci can become one
+ *      three-input two-output pattern instead of two half patterns that no chip
+ *      corresponds to.
+ *
+ *      STATUS: the merge is implemented and does produce multi-output patterns, but on
+ *      a ripple-carry chain it currently recovers a three-element sum/carry fragment
+ *      rather than the five-element full adder, because the input budget that stops a
+ *      cone walking the carry chain also stops the carry cone admitting the AND that
+ *      reads the internal XOR. Consequence, stated plainly: on such a chain the report
+ *      offers a *near* match to the full adder with the differing row count, and does
+ *      not claim the substitution. Nothing in the engine, the CLI or the interface
+ *      depends on this module yet, and it is not exported from the barrel until the
+ *      merge recovers the whole block.
  *   5. Every candidate is measured: its external inputs are driven through all
  *      combinations the level-0 engine can hold in one settle (32 lanes, so up to
  *      five inputs exhaustively) and its outputs sampled. A pattern with more inputs
@@ -34,9 +44,10 @@
  *      function — not because its name looked plausible.
  *
  * What it does not do: it does not find patterns that have no distinguished output
- * element, it does not look deeper than `depth`, and it does not consider analogue
- * circuitry at all. Those limits are in the report's notes, because a tool that
- * reports "no repetition found" must also say where it looked.
+ * element, it does not look deeper than `depth`, it does not consider analogue
+ * circuitry at all, and it never suggests a substitution on a near match. Those limits
+ * are in the report's notes, because a tool that reports "no repetition found" must
+ * also say where it looked.
  */
 
 import { ChipLibrary, type Chip } from '../core/chip.js';
