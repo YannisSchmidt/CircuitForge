@@ -141,6 +141,11 @@ it again rather than rewriting gates by index into a circuit that has moved on.
 population and a seed. The search runs in the frame loop, so the interface stays responsive
 and the status bar says it is working.
 
+*Optimize ▸ Synthesize design…* is the same pipeline taken end to end, and it is what the
+specification calls reverse engineering: you give a behavioural contract instead of a circuit,
+and the program generates architectures, searches them, details the winner, simulates it,
+validates it and saves it as a chip you can then place and open.
+
 The result dialog reports the best candidate — components, depth, delay, power, temperature,
 stability risk — the ranked candidates, and the scope: specification, profile, budget,
 population, seed and which tiers ran. Objectives a tier never scored print as *not measured*.

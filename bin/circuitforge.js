@@ -324,12 +324,19 @@ async function loadSubject(cf, flags, positional) {
     const loaded = cf.loadProjectText(text, { lib, chips, name: path.basename(abs) });
     // `LoadResult.errors` and `.warnings` are *counts*; the messages live in
     // `diagnostics`. Iterating the counts used to throw on every `--file` load.
+    // Errors and warnings are printed in full: they change what a number printed later
+    // means. Notes are compressed, because a project saved from the reference library
+    // carries one per parametric chip and five identical lines teach nobody anything.
+    const notes = [];
     for (const d of loaded.diagnostics ?? []) {
       const code = d.code ? ` [${d.code}]` : '';
       if (d.severity === 'error') warn(`  load error${code}: ${d.message}`);
       else if (d.severity === 'warning') warn(`  load warning${code}: ${d.message}`);
-      else warn(`  load note${code}: ${d.message}`);
+      else notes.push(`${code}: ${d.message}`);
     }
+    for (const note of notes.slice(0, 2)) warn(`  load note${note}`);
+    if (notes.length > 2) warn(`  … and ${notes.length - 2} more load note(s) of the same kind (--verbose lists them)`);
+    if (bool(flags, 'verbose')) for (const note of notes.slice(2)) warn(`  load note${note}`);
     const chipCount = loaded.project?.chips ? loaded.project.chips.all().length : 0;
     if (loaded.errors > 0 && !loaded.project?.sheet && chipCount === 0) {
       fail(`${file} could not be loaded`, `${loaded.errors} error(s) reported above`);

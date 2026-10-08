@@ -59,7 +59,11 @@ then thermal, then device detail — scored against weighted objectives with six
 profiles (BALANCED, FASTEST, SMALLEST, LOW_POWER, LOW_TEMPERATURE, MOST_STABLE).
 Results are reported as *best found under current constraints*, with the constraints,
 search space, method, candidate count, simulation level and ranking criteria attached.
-"WHY THIS DESIGN?" answers only with measured deltas against the runner-up.
+"WHY THIS DESIGN?" answers only with measured deltas against the runner-up. Run end to end
+that is the specification's **reverse-engineering mode**: hand it a behavioural contract and
+it generates architectures, searches, details the winner, simulates it, validates it and
+saves it as a chip — `circuitforge synth --spec adder --param bits=4`, *Optimize ▸ Synthesize
+design…* in the interface, or `POST /api/synth`.
 
 **Validate.** Before a design is saved as a chip: logic (exhaustive when the input
 space is small enough), electrical convergence, timing, thermal, power balance, edge

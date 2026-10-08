@@ -156,7 +156,12 @@ models and the implementation, and the engine reports them rather than papering 
   `npm start`, which serves the editor and opens it.
 - **Files live on the server**, in its `data/` directory. A browser import reads a file from
   your machine; a save writes to the server. There is no cloud storage and no collaboration.
-- **The console dock keeps 3 000 lines** and drops the oldest beyond that.
+- **No automated browser test clicks the canvas.** Everything that can go wrong when a user
+  edits a circuit lives in `src/ui/` — typed, DOM-free and tested headlessly — and the served
+  modules are checked to parse and to be delivered as executable JavaScript with the engine
+  reachable as ES modules. What is *not* covered is the DOM layer itself: no test in this
+  repository drives a real browser, so a layout or event-handling defect in `public/` would be
+  found by a person using it, not by `npm test`.
 
 ## Documentation and process
 
