@@ -1,6 +1,15 @@
 # CircuitForge Specification (37 sections)
 
 This document is the canonical specification that this implementation tracks.
+
+> **Implementation note.** The specification was written against a Python prototype, which
+> this repository no longer contains: version 1.0.0 is a TypeScript engine with a browser
+> interface and a headless CLI, and the runtime dependency list is empty. Where a section
+> below names a Python module, the corresponding TypeScript module is listed in
+> [ARCHITECTURE.md](ARCHITECTURE.md) and the public surface in [API.md](API.md). The
+> requirements themselves — hierarchy, four simulation levels, declared accuracy, synthesis,
+> jobs, validation, analysis, export, reproducibility and the honesty rules — are unchanged,
+> and [CHANGELOG.md](CHANGELOG.md) records what each became.
 Each section describes a feature, its accuracy class, and the limitations of
 the current implementation.
 
@@ -14,7 +23,8 @@ the current implementation.
 ## Section 1 — Goals
 
 CircuitForge is a complete circuit design, simulation, and synthesis toolchain.
-It targets the level of professional EDA tools but in pure Python with NumPy
+It targets the level of professional EDA tools, implemented in TypeScript
+on Node.js with no runtime dependency
 as its only hard dependency.
 
 ## Section 2 — Physics modeling philosophy
@@ -135,7 +145,8 @@ and checks convergence. `validate_thermal` runs a short thermal sim.
 
 ## Section 14 — GPU acceleration
 
-`Engine` is a thin wrapper around NumPy with optional CuPy. The engine
+`Engine` is typed-array arithmetic (Float64Array, Int32Array) with no
+external numerical library and, in this build, no GPU backend. The engine
 chooses GPU when (a) CuPy is available, (b) the user hasn't forced CPU
 (`set_force_cpu(True)` or `CIRCUITFORGE_NO_GPU=1`), and (c) the workload
 size is above a configurable threshold. Stats are exposed via `engine.stats()`.
@@ -178,7 +189,7 @@ The CLI exposes the most common operations:
 
 ## Section 19 — GUI
 
-A Tkinter-based stub. Loads a JSON project, runs logic simulation, runs
+A browser-based laboratory served by the engine's own HTTP server. Loads a JSON project, runs logic simulation, runs
 validation. Full schematic editing is on the roadmap.
 
 ## Section 20 — Persistence
@@ -198,12 +209,12 @@ under 1 second on a modern machine.
 
 ## Section 23 — Benchmarks
 
-Reproducible benchmark suite in `benchmarks.py`. Each benchmark returns a
+Reproducible benchmark suite in `src/engine/bench`. Each benchmark returns a
 `BenchmarkResult` with timing, memory, and notes.
 
 ## Section 24 — Stress tests
 
-`stress.py` pushes the system beyond nominal conditions: wide buses,
+The `stress` suite pushes the system beyond nominal conditions: wide buses,
 random graphs, long persistence cycles. The harness returns a list of
 `StressResult` objects.
 
@@ -237,6 +248,12 @@ Items deliberately deferred to future versions:
 
 ## Sections 29-37 — Compliance, security, dependencies
 
-CircuitForge has no network calls, no file-system access outside the
-user-provided paths, and no hard dependency beyond NumPy. CuPy is
-optional. Tkinter is part of the standard library.
+CircuitForge has **zero runtime dependencies**: the engine, the server
+and the interface are TypeScript and ES modules on Node.js 20 or newer,
+with only a TypeScript compiler at build time. The engine makes no
+network call and touches no file: file access lives in the CLI and in the
+server, restricted to the paths the user gives (`--out`, the server's
+`data/` directory) and containment-checked so a path cannot walk out of
+them. There is no native module and no GPU requirement; a compute backend
+is probed for and, in this build, none is present (see
+[GPU.md](GPU.md)).
