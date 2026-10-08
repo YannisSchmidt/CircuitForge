@@ -411,6 +411,35 @@ Reference chips: `not1`, `nand2`, `xor2`, `bus_and`, `half_adder`, `full_adder`,
 `ripple_adder`, `mux2`, `mux4`, `mux_tree`, `decoder_2to4`, `decoder_3to8`,
 `priority_encoder_8to3`, `register_n`, `counter_n`, `alu_n`, `ram_n`, `rom_n`, `cpu8`.
 
+## Mining — `cf.mining`
+
+```ts
+mineSubcircuits(circuit, lib, chips?, opts?: {
+  depth?, minOccurrences?, maxPatterns?, measure?, matchChips?, maxMeasuredInputs?,
+  maxPatternInputs?, maxPatternSize?, coneSlack?, mergeOutputs?, ambient?
+}): MiningReport
+
+replacePatternWithChip(circuit, lib, chips, pattern, opts?: {
+  chipId?, limit?
+}): ReplaceResult
+
+miningToText(report): string
+markSubBlocks(patterns): { tests: number, cutShort: boolean }
+inspectCones(circuit, lib, chips?, opts?): unknown[]   // what the miner sees, for tests
+adjacency(graph), refineColours(graph, adj, rounds), coneOf(...), canonicalCone(...)
+```
+
+`MiningReport.patterns[]` carries `id`, `description`, `kinds`, `size`, `inputs`, `outputs`,
+`count`, `occurrences[]` (with `refs`, `paths`, `onSheet`, and the net names a replacement wires
+to), `behaviour` (`rows`, `complete`, `measured`, and the `reason` when it was not), `matchedChip`
+(`id`, `version`, `identical`, `differingRows`, `note`), `suggestedChip`, `subBlockOf` and
+`saving` (`replaceable`, `componentsTotal`, …). `ReplaceResult` carries the rewritten `circuit`,
+`replaced`, `skipped[]` with a reason each, before/after component and net counts, `diagnostics`
+and `notes`.
+
+There is deliberately no `expandGates` option here: mining reads the logic graph, and a gate
+lowered to transistors is not a logic element.
+
 ## Server — `dist/server/index.js`
 
 ```ts
@@ -422,7 +451,16 @@ startServer(opts?: {
 Binds every interface by default so a preview proxy can reach it, serves `public/`, the
 compiled engine under `/engine/` and `/ui/`, the documents under `/docs/`, and a JSON API
 under `/api/`: `health`, `library`, `chips`, `examples`, `specs`, `profiles`, `projects`,
-`project/save`, `project/open`, `simulate`, `analyze`, `validate`, `optimize`, `synth`,
+`project/save`, `project/open`, `simulate`, `analyze`, `mine`, `validate`, `optimize`, `synth`,
 `export`, `jobs` (+ `enqueue`, `pause`, `resume`, `cancel`, `priority`, `reorder`,
 `resume-interrupted`, `history`) and `benchmark`. Errors carry the engine's own code and,
 where there is one, a hint.
+
+`POST /api/mine` takes a circuit document and the miner's options, and answers with the report.
+With `replace: true` it also substitutes the identical matches — optionally `pattern`, `chip` and
+`limit` — and returns the rewritten circuit document, the counts, and every skipped occurrence
+with its reason. Asking it to replace a block that is *not* identical to a chip is a `409 CF409`,
+not a silent approximation. Because placing a chip needs that chip's component spec, the server
+builds the component library and the chip library as a pair (`libraryPair`): a document-only
+request is answered with the reference project's two libraries, and a request that brings its own
+chips gets their specs registered into a fresh library.

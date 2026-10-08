@@ -171,6 +171,16 @@ export interface ElementSink {
    */
   setExpanding?(on: boolean): void;
   /**
+   * Counts a gate that could have been expanded but was not, because its own `style`
+   * parameter is the default `ideal`.
+   *
+   * Expansion needs two conditions at once — the flatten option *and* a non-ideal style
+   * on the gate — and the second one lives on the component, where no command line and
+   * no checkbox can reach it. Counting the gates that stayed ideal is what lets the
+   * netlist tell a caller who asked for expansion that nothing happened, and why.
+   */
+  countIdealGate?(): void;
+  /**
    * Register a piecewise-linear waveform table and return its handle, or −1 when
    * the table is unusable. Optional so a test sink that never lowers an arbitrary
    * source does not have to implement it — and so a source that needs one on a sink
@@ -1128,6 +1138,12 @@ function lowerGate(ctx: LowerContext, p: ParamReader, instIndex: number): void {
       ctx.sink.setExpanding?.(false);
     }
     return;
+  }
+
+  if (ctx.options.expandGates && needsCmosExpansion(spec.id)) {
+    // The option was on and this gate is one the expander knows, so the only reason it
+    // is still here as a gate is its style. Record that; the netlist reports it.
+    ctx.sink.countIdealGate?.();
   }
 
   const wired = spec.pins.filter((pin) => pin.direction === 'input').slice(0, inputs);

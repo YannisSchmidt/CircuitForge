@@ -196,6 +196,25 @@ export class Editor {
     return { diagnostics: result.diagnostics };
   }
 
+  /**
+   * Swap the current sheet for a circuit built elsewhere — the shape a bulk rewrite
+   * arrives in, such as replacing every occurrence of a mined pattern with a chip.
+   *
+   * This is deliberately not `loadDocument`: loading a file starts a new history and
+   * clears the undo stack, which is right for a file and wrong for an edit. A bulk
+   * rewrite is an edit, so the sheet the user had is checkpointed first and Ctrl+Z
+   * gives it back. The circuit is taken as it is — no re-serialization round trip —
+   * because a rewrite of 900 components should not pay for one.
+   */
+  replaceSheet(circuit: Circuit, reason = 'replace'): void {
+    this.checkpoint();
+    this.layer.circuit = circuit;
+    this.layer.title = circuit.name;
+    this.selection = [];
+    this.selectedNet = null;
+    this.markChanged(reason);
+  }
+
   /** A fresh empty sheet, discarding everything (the caller confirms first). */
   newProject(name = 'untitled'): void {
     this.layers.length = 0;

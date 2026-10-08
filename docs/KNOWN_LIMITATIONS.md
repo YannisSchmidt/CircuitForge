@@ -47,6 +47,17 @@ models and the implementation, and the engine reports them rather than papering 
 - **Valid ranges are declared per claim.** Outside them the model still computes a number; the
   card says where it stops being valid, and a thermal solve that leaves the range is reported
   as out of range rather than clamped.
+- **Gate expansion needs two conditions, and only one of them is a flatten option.**
+  `expandGates: true` permits expansion; a gate actually expands only when its own `style`
+  parameter is not the default `ideal` (for example `cmos_static`). A netlist can therefore hold
+  ideal gates and transistor-level gates at once. This is reported rather than left implicit:
+  `CF6012` counts the gates and transistors produced, and `CF6013` warns when expansion was
+  requested and no gate qualified. The counters are `expandedGates`, `gatesLeftIdeal` and
+  `expandedTransistors`.
+- **Expanded gates have no level-0 behaviour.** A gate lowered to transistors contributes
+  devices, not a logic element, so a fully expanded netlist settles electrically and has nothing
+  for the logic engine — or the miner — to read. That is why mining flattens with expansion off
+  and offers no option to turn it on.
 
 ## Level 3 — thermal
 
@@ -89,6 +100,25 @@ models and the implementation, and the engine reports them rather than papering 
   testability analysis.
 - **Zones (slow, hot, power) require a solved simulator.** Without one they are empty, and the
   report says nothing was measured rather than showing zeros.
+- **Mining sees the logic layer only.** Repeated subcircuits are found among flattened logic
+  elements: resistive, reactive and semiconductor circuitry is not mined, and a block whose
+  identity is analogue (a filter section, a bias network) is out of reach of this method.
+- **Mining needs a distinguished output.** Cones are grown backwards from an element, so a
+  repeating structure with no element that drives something outside itself — a symmetric
+  lattice, say — is not a candidate.
+- **Shape equality is not proven isomorphism.** Two cones are called the same shape when their
+  cone-local colour refinement agrees. That is a strong test and it has no known counterexample
+  in this codebase, but it is not a canonical-labelling proof, and every report says so. What
+  settles a match is the measured truth table.
+- **Only cones over the same external nets are merged.** A full adder is merged because its sum
+  cone and its carry cone both read `a`, `b` and `ci`. Two outputs whose cones read different
+  nets stay two findings, so a block like "correct sum, carry taken from a two-input AND" is
+  reported as its parts rather than as one wrong adder.
+- **Behaviour is measured exhaustively only up to five inputs.** Beyond that the truth table is
+  sampled, is labelled as not exhaustive, and a match against a chip is correspondingly weaker.
+- **Occurrences inside a chip expansion are reported but not replaceable.** They belong to
+  another sheet; editing them from here would change every instance of that chip. The count of
+  replaceable occurrences is reported separately from the count of occurrences.
 
 ## Rendering
 

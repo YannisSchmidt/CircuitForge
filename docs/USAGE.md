@@ -61,6 +61,34 @@ Prints the summary, the critical path with its gate chain and the timing model n
 statistics, zones, and every finding with its code. A 0 ns critical path is labelled a lower
 bound when the elements declare no delay.
 
+## Mine
+
+```bash
+circuitforge mine --chip ripple_adder --param bits=8     # what does this design repeat?
+circuitforge mine --file sheet.cfproj                    # the same, for a saved sheet
+circuitforge mine --file sheet.cfproj --replace --out rewritten.json
+circuitforge mine --example alu --min 4 --max-inputs 4 --json
+```
+
+Prints every block the sheet repeats: its shape, how many times it occurs, how many of those
+occurrences are on this sheet, its measured truth table, and the library chip that computes the
+same thing — `IDENTICAL` when every measured row agrees, or the number of rows that differ.
+`--replace` substitutes the identical matches and, with `--out`, writes the rewritten sheet as a
+circuit document; occurrences inside a chip expansion are skipped with the reason, because they
+belong to another sheet. A near match is never substituted.
+
+| Flag | Meaning |
+|---|---|
+| `--min N` | report a block only from N occurrences (2; 1 lists blocks worth chipping) |
+| `--depth N` | fan-in cone depth that defines a block (3) |
+| `--max-inputs N` | widest cone to consider, in external inputs (5) |
+| `--max-size N` | most elements in one block (12) |
+| `--max N` | cap on blocks reported, best first (24) |
+| `--pattern ID` | which block `--replace` acts on |
+| `--chip ID` | instantiate this chip instead of the matched one |
+| `--limit N` | replace at most N occurrences |
+| `--no-measure`, `--no-match` | skip the measurement, or skip comparing with the library |
+
 ## Validate
 
 ```bash

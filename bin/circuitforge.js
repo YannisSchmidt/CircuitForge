@@ -322,11 +322,18 @@ async function loadSubject(cf, flags, positional) {
     if (!fs.existsSync(abs)) fail(`no such file: ${file}`, 'pass a project file saved by `circuitforge export --format project`');
     const text = fs.readFileSync(abs, 'utf8');
     const loaded = cf.loadProjectText(text, { lib, chips, name: path.basename(abs) });
-    for (const e of loaded.errors ?? []) warn(`  load error: ${typeof e === 'string' ? e : e.message ?? JSON.stringify(e)}`);
-    if (loaded.errors?.length && !loaded.project?.sheet && loaded.project?.chips.all().length === 0) {
-      fail(`${file} could not be loaded`, `${loaded.errors.length} error(s) reported above`);
+    // `LoadResult.errors` and `.warnings` are *counts*; the messages live in
+    // `diagnostics`. Iterating the counts used to throw on every `--file` load.
+    for (const d of loaded.diagnostics ?? []) {
+      const code = d.code ? ` [${d.code}]` : '';
+      if (d.severity === 'error') warn(`  load error${code}: ${d.message}`);
+      else if (d.severity === 'warning') warn(`  load warning${code}: ${d.message}`);
+      else warn(`  load note${code}: ${d.message}`);
     }
-    for (const w of loaded.warnings ?? []) warn(`  load warning: ${typeof w === 'string' ? w : w.message ?? JSON.stringify(w)}`);
+    const chipCount = loaded.project?.chips ? loaded.project.chips.all().length : 0;
+    if (loaded.errors > 0 && !loaded.project?.sheet && chipCount === 0) {
+      fail(`${file} could not be loaded`, `${loaded.errors} error(s) reported above`);
+    }
     const p = loaded.project;
     const circuit = pickCircuit(cf, p, chipId, params, flags);
     return { project: p, lib: p.lib ?? lib, chips: p.chips ?? chips, circuit, name: circuit.name || p.name || path.basename(abs), source: `file:${path.relative(process.cwd(), abs) || abs}` };
@@ -445,6 +452,11 @@ function flattenSubject(cf, subject, flags) {
     ambient,
     expandGates: str(flags, 'gate-style') !== 'ideal' || bool(flags, 'expand-gates'),
   });
+  // Gate expansion is a two-condition feature and the second condition lives on the
+  // gate, not on the command line: say so whenever the engine reports it.
+  for (const d of nl.diagnostics) {
+    if (d.code === 'CF6012' || d.code === 'CF6013') warn(`  ${d.code} ${d.message}${d.hint ? ` — ${d.hint}` : ''}`);
+  }
   const errors = nl.diagnostics.filter((d) => d.severity === 'error');
   if (errors.length > 0 && !bool(flags, 'force')) {
     for (const d of errors.slice(0, 12)) warn(`  ${d.code} ${d.message}`);
@@ -467,6 +479,7 @@ const COMMANDS = {
   examples: { summary: 'show the worked examples, verify them, or write them to disk', fn: cmdExamples },
   simulate: { summary: 'solve a design: DC operating point, transient, thermal', fn: cmdSimulate },
   analyze: { summary: 'critical path, unused parts, loops, slow/hot/power zones', fn: cmdAnalyze },
+  mine: { summary: 'find repeated subcircuits, match them to chips, offer replacement', fn: cmdMine },
   validate: { summary: 'run the validation gate on a circuit or a chip', fn: cmdValidate },
   optimize: { summary: 'search for a design meeting a behavioural spec', fn: cmdOptimize },
   synth: { summary: 'spec → search → detail → validate → chip (auto design)', fn: cmdSynth },
@@ -503,7 +516,10 @@ function cmdHelp(cf, flags, positional) {
   out.push('  --samples N            points in the record (20000)');
   out.push('  --thermal              build the thermal network and report temperatures');
   out.push('  --ambient C            ambient temperature for the thermal solve (27)');
-  out.push('  --gate-style STYLE     cmos_static | ideal — how gates are lowered');
+  out.push('  --gate-style STYLE     cmos_static | ideal — the `style` parameter gates are built with');
+  out.push('  --expand-gates         let flattening expand gates into CMOS transistor networks;');
+  out.push('                         a gate expands only if its own style is not ideal, and the');
+  out.push('                         netlist says so (CF6012 expanded, CF6013 nothing expanded)');
   out.push('');
   out.push('SYNTHESIS AND OPTIMIZATION');
   out.push('  --spec ID              a behavioural spec (`circuitforge list --what specs`)');
@@ -522,6 +538,16 @@ function cmdHelp(cf, flags, positional) {
   out.push('');
   out.push('SERVER');
   out.push('  --port N               port for `serve` (8080)');
+  out.push('');
+  out.push('  Flags for `mine`:');
+  out.push('  --min N                report a pattern only from N occurrences (2)');
+  out.push('  --depth N              fan-in cone depth that defines a pattern (3)');
+  out.push('  --max-inputs N         widest cone to consider, in external inputs (5)');
+  out.push('  --max N                cap on patterns reported, best first (24)');
+  out.push('  --pattern ID           which pattern to act on with --replace');
+  out.push('  --replace              replace identical matches with the chip they matched');
+  out.push('  --chip ID              chip to instantiate instead of the matched one');
+  out.push('  --limit N              replace at most N occurrences');
   out.push('  --host ADDR            bind address (0.0.0.0)');
   out.push('  --no-open              do not try to open a browser');
   out.push('');
@@ -759,7 +785,7 @@ async function cmdDoctor(cf, flags) {
   check('hierarchy flattens: cpu8 → elements', () => {
     const chip = chips?.get('cpu8');
     if (!chip) throw new Error('the reference library has no cpu8');
-    const nl = cf.flatten(chip.implementation({}), lib, chips, { metadata: true, expandGates: true });
+    const nl = cf.flatten(chip.implementation({}), lib, chips, { metadata: true, expandGates: false });
     const errors = nl.diagnostics.filter((d) => d.severity === 'error');
     if (errors.length) throw new Error(errors.map((d) => `${d.code} ${d.message}`).join('; '));
     if (nl.elementCount < 100) throw new Error(`only ${nl.elementCount} elements`);
@@ -1196,6 +1222,97 @@ async function cmdAnalyze(cf, flags, positional) {
   }
   const text = cf.analysisToText(report, { verbose: bool(flags, 'verbose') });
   emit(`ANALYSIS — ${subject.name} (from ${subject.source})\n\n${text}`, flags, 'analysis');
+  return 0;
+}
+
+/**
+ * Find the subcircuits a design repeats, work out what each one computes by measuring
+ * it, and say which chip — if any — computes the same thing.
+ *
+ * Replacement happens only when asked for, and only for occurrences that live on the
+ * sheet being mined: an occurrence inside a chip expansion belongs to another sheet,
+ * and editing it from here would change every instance of that chip. The report says
+ * how many were replaced and how many were skipped, with the reason for each skip.
+ */
+async function cmdMine(cf, flags, positional) {
+  const subject = await loadSubject(cf, flags, positional);
+  const report = cf.mining.mineSubcircuits(subject.circuit, subject.lib, subject.chips, {
+    depth: num(flags, 'depth', 3),
+    minOccurrences: num(flags, 'min', 2),
+    maxPatterns: num(flags, 'max', 24),
+    maxPatternInputs: num(flags, 'max-inputs', 5),
+    maxPatternSize: num(flags, 'max-size', 12),
+    measure: !bool(flags, 'no-measure'),
+    matchChips: !bool(flags, 'no-match'),
+  });
+
+  const wantReplace = flags.replace !== undefined && flags.replace !== false;
+  let replacement = null;
+  if (wantReplace) {
+    const patternId = str(flags, 'pattern');
+    const candidates = report.patterns.filter((p) => p.matchedChip?.identical || patternId);
+    const pattern = patternId ? report.patterns.find((p) => p.id === patternId) : candidates[0];
+    if (!pattern) {
+      warn('nothing to replace: no pattern matched a chip identically. `mine` reports near matches with how many rows differ, and never substitutes on a near match.');
+    } else {
+      replacement = cf.mining.replacePatternWithChip(subject.circuit, subject.lib, subject.chips, pattern, {
+        chipId: str(flags, 'chip') ?? undefined,
+        limit: flags.limit === undefined ? undefined : num(flags, 'limit', 0) || undefined,
+      });
+      replacement.patternId = pattern.id;
+      replacement.description = pattern.description;
+    }
+  }
+
+  if (isJson(flags)) {
+    emitJson(
+      {
+        source: subject.source,
+        name: subject.name,
+        report,
+        replacement: replacement
+          ? {
+              patternId: replacement.patternId,
+              description: replacement.description,
+              chipId: replacement.chipId,
+              replaced: replacement.replaced,
+              skipped: replacement.skipped,
+              componentsBefore: replacement.componentsBefore,
+              componentsAfter: replacement.componentsAfter,
+              netsBefore: replacement.netsBefore,
+              netsAfter: replacement.netsAfter,
+              diagnostics: replacement.diagnostics,
+              notes: replacement.notes,
+            }
+          : null,
+      },
+      flags,
+    );
+    return 0;
+  }
+
+  const lines = [`REPEATED SUBCIRCUITS — ${subject.name} (from ${subject.source})`, '', cf.mining.miningToText(report)];
+  if (replacement) {
+    lines.push('', `Replacement of ${replacement.patternId} (${replacement.description}) with ${replacement.chipId}:`);
+    for (const note of replacement.notes) lines.push(`  - ${note}`);
+    lines.push(`  ${replacement.componentsBefore} component(s) -> ${replacement.componentsAfter}, ${replacement.netsBefore} net(s) -> ${replacement.netsAfter}`);
+    const errors = replacement.diagnostics.filter((d) => d.severity === 'error');
+    lines.push(`  ERC after replacement: ${errors.length} error(s), ${replacement.diagnostics.filter((d) => d.severity === 'warning').length} warning(s)`);
+    if (replacement.replaced > 0) {
+      const out = str(flags, 'out');
+      const document = cf.circuitToDocument(replacement.circuit);
+      if (out) {
+        lines.push('', `The replaced sheet was written as a circuit document.`);
+        emit(`${lines.join('\n')}\n`, { ...flags, out: undefined }, 'mining');
+        emitJson(document, flags);
+        return 0;
+      }
+      lines.push('', 'Nothing was written: pass --replace with --out <file.json> to keep the replaced sheet.');
+    }
+  } else if (wantReplace) {
+    lines.push('', 'No replacement was performed.');
+  }
+  emit(`${lines.join('\n')}\n`, flags, 'mining');
   return 0;
 }
 

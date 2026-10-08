@@ -138,7 +138,7 @@ export class SimulationPane {
       <label><input type="checkbox" data-opt="logic" checked /> L0 logic</label>
       <label><input type="checkbox" data-opt="electrical" /> L1 electrical</label>
       <label><input type="checkbox" data-opt="thermal" /> L3 thermal</label>
-      <label><input type="checkbox" data-opt="expandGates" /> expand gates to transistors</label>
+      <label title="Flattening expands a gate into its CMOS transistor network only when that gate's own 'style' parameter is not the default 'ideal' (for example cmos_static, set in the Inspector). Ticking this on a sheet of default gates changes nothing, and the console then says so (CF6013) instead of leaving you to guess."><input type="checkbox" data-opt="expandGates" /> expand gates to transistors (gate needs style ≠ ideal)</label>
       <label><input type="checkbox" data-opt="truthTable" checked /> truth table</label>
       <span class="tsep"></span>
       <label>ambient <input type="number" data-opt="ambient" value="25" step="1" style="width:64px" /> °C</label>
@@ -191,6 +191,14 @@ export class SimulationPane {
     this.error = null;
     try {
       const nl = this.netlist();
+      // The netlist carries the truth about what flattening did, including whether the
+      // gate expansion just asked for actually happened. Surface it rather than letting
+      // a ticked box imply a transistor-level netlist that was never built.
+      for (const d of nl.diagnostics ?? []) {
+        if (d.code === 'CF6012' || d.code === 'CF6013') {
+          this.app.log(`${d.code} ${d.message}${d.hint ? ` — ${d.hint}` : ''}`, d.severity === 'warning' ? 'warn' : 'info', 'sim');
+        }
+      }
       const result = { netlist: cf.netlistStats(nl), logic: null, dc: null, thermal: null, transient: null, accuracy: [] };
       const nets = {};
       const nodes = {};
@@ -1075,13 +1083,16 @@ export class AnalysisPane {
     this.root = root;
     this.app = app;
     this.report = null;
+    this.mining = null;
     root.innerHTML = `<div style="display:flex;gap:6px;align-items:center;margin-bottom:8px;flex-wrap:wrap">
         <button class="primary" data-an="run">Analyze circuit</button>
         <button data-an="critical">Highlight critical path</button>
         <button data-an="unused">Select unused components</button>
+        <button data-an="mine" title="Grow fan-in cones over the flattened logic, group them by a canonical form, measure what each one computes, and compare it with the chip library">Find repeated subcircuits</button>
         <button data-an="save">Save report</button>
         <span id="an-summary" class="badge"></span>
-      </div><div id="an-body"><div class="empty">Run the analyzer to get the critical path, unused components, redundant connections, fan-out risks, loops and constraint violations — with the timing model that produced them named.</div></div>`;
+      </div><div id="an-body"><div class="empty">Run the analyzer to get the critical path, unused components, redundant connections, fan-out risks, loops and constraint violations — with the timing model that produced them named.</div></div>
+      <div id="an-mine"></div>`;
     root.addEventListener('click', (e) => {
       const el = e.target.closest('[data-an]');
       if (!el) return;
@@ -1089,8 +1100,147 @@ export class AnalysisPane {
       if (action === 'run') this.run();
       else if (action === 'critical') this.highlightCritical();
       else if (action === 'unused') this.selectUnused();
+      else if (action === 'mine') this.mine();
       else if (action === 'save') this.save();
+      return;
     });
+    // Replacement is offered per pattern, inside the mining cards.
+    root.addEventListener('click', (e) => {
+      const el = e.target.closest('[data-mine-replace]');
+      if (!el || el.disabled) return;
+      this.replacePattern(el.dataset.mineReplace);
+    });
+  }
+
+  /**
+   * Find the subcircuits this sheet repeats, and say which chip computes the same thing.
+   *
+   * The identity test is a measured one: each block's truth table is produced by
+   * simulating it at level 0 and compared with the library chip's, row by row. A block
+   * that matches on every row is offered for replacement; one that differs on some rows
+   * is reported with the number of rows that differ and is *not* offered, because
+   * substituting it would change what the circuit computes.
+   */
+  mine() {
+    const editor = this.app.editor;
+    try {
+      const t0 = performance.now();
+      this.mining = cf.mining.mineSubcircuits(editor.circuit, editor.lib, editor.chips, {});
+      // A mined pattern is a list of element indices into *this* circuit. Editing the
+      // sheet invalidates them, and acting on stale indices would rewrite the wrong
+      // gates — so the revision is remembered and checked before any replacement.
+      this.miningRevision = editor.circuit.revision;
+      const r = this.mining;
+      const identical = r.patterns.filter((p) => p.matchedChip?.identical && !p.subBlockOf).length;
+      this.app.log(
+        `mined ${editor.circuit.name} in ${fmtMs(performance.now() - t0)}: ${r.patterns.length} repeated block(s), ${r.matched} matched a library chip, ${identical} identical and replaceable`,
+        r.patterns.length === 0 ? 'info' : 'ok',
+        'analyze',
+      );
+      for (const note of r.notes) this.app.log(`  ${note}`, 'info', 'analyze');
+      this.renderMining();
+    } catch (err) {
+      this.app.log(`mining failed: ${err.code ? err.code + ': ' : ''}${err.message}`, 'error', 'analyze');
+    }
+  }
+
+  renderMining() {
+    const host = this.root.querySelector('#an-mine');
+    const r = this.mining;
+    if (!host) return;
+    if (!r) {
+      host.innerHTML = '';
+      return;
+    }
+    if (r.patterns.length === 0) {
+      host.innerHTML = `<div class="card"><header>Repeated subcircuits</header><div class="body"><div class="empty">Nothing repeats within the searched depth. ${esc(r.notes[0] ?? '')}</div></div></div>`;
+      return;
+    }
+    const cards = r.patterns.map((p) => {
+      const chip = p.matchedChip;
+      const badge = chip
+        ? chip.identical
+          ? `<span class="badge ok">identical to ${esc(chip.id)} v${esc(chip.version)}</span>`
+          : `<span class="badge warn">differs from ${esc(chip.id)} on ${chip.differingRows} row(s)</span>`
+        : `<span class="badge">no chip computes this — a new one would be ${esc(p.suggestedChip?.name ?? '?')}</span>`;
+      const replaceable = p.saving.replaceable > 0 && chip?.identical && !p.subBlockOf;
+      const table = p.behaviour?.rows?.length
+        ? `<div class="group-title">Measured truth table</div><pre class="code" style="max-height:96px">${esc(p.behaviour.rows.slice(0, 32).join(' '))}${p.behaviour.rows.length > 32 ? ' …' : ''}</pre>`
+        : '';
+      const behaviour = p.behaviour?.measured
+        ? `${p.behaviour.inputs} in → ${p.behaviour.outputs} out, ${p.behaviour.rows.length} combination(s) measured${p.behaviour.complete ? ' exhaustively' : ', not exhaustive'}`
+        : `NOT MEASURED — ${p.behaviour?.reason ?? 'unknown'}`;
+      const why = replaceable
+        ? `Replace all ${p.saving.replaceable} occurrence(s) with ${chip?.id ?? 'the chip'}. Undoable: the sheet before the rewrite is checkpointed.`
+        : chip?.identical
+          ? p.subBlockOf
+            ? 'Sub-block of a larger reported pattern: replacing this first would break it.'
+            : 'No occurrence of this pattern is on this sheet — they live inside chip expansions, which belong to another sheet.'
+          : 'Not identical to any library chip, so it will not be substituted.';
+      return `<div class="card">
+        <header>${esc(p.description)} <span class="badge info">${p.count}× · ${p.size} element(s)</span> ${badge}</header>
+        <div class="body tight">
+          <dl class="kv">
+            <dt>Behaviour</dt><dd>${esc(behaviour)}</dd>
+            <dt>On this sheet</dt><dd>${p.saving.replaceable} of ${p.count} occurrence(s)</dd>
+            <dt>Would remove</dt><dd>about ${p.saving.componentsTotal} component(s)</dd>
+            ${p.subBlockOf ? `<dt>Sub-block of</dt><dd>[${esc(p.subBlockOf)}]</dd>` : ''}
+          </dl>
+          ${table}
+          <div style="display:flex;gap:6px;align-items:center;margin-top:6px;flex-wrap:wrap">
+            <button data-mine-replace="${esc(p.id)}" ${replaceable ? '' : 'disabled'}>${chip?.identical ? `Replace with ${esc(chip.id)}` : 'No identical chip'}</button>
+            <span class="note">${esc(why)}</span>
+          </div>
+        </div>
+      </div>`;
+    });
+    host.innerHTML = `<div class="card"><header>Repeated subcircuits <span class="badge">${r.elements} logic element(s) · ${r.ms.toFixed(1)} ms</span></header><div class="body"><div class="empty">Blocks the sheet repeats, what each one computes (measured at level 0), and the library chip that computes the same thing. Equality of shape is a strong test but not a proof of isomorphism; the measured truth table is what confirms a match.</div></div></div>${cards.join('')}`;
+  }
+
+  /**
+   * Substitute a pattern with the chip it matched.
+   *
+   * The engine returns a rewritten circuit rather than editing in place, so the editor
+   * swaps the sheet through `replaceSheet`, which checkpoints first: a bulk rewrite is
+   * an edit, and Ctrl+Z has to give the sheet back.
+   */
+  replacePattern(patternId) {
+    const editor = this.app.editor;
+    const pattern = this.mining?.patterns.find((p) => p.id === patternId);
+    if (!pattern) {
+      this.app.log(`no mined pattern "${patternId}" — run the search again`, 'warn', 'analyze');
+      return;
+    }
+    if (!pattern.matchedChip?.identical) {
+      this.app.log(`refusing to replace ${patternId}: it is not identical to any chip, so substituting it would change what the circuit computes`, 'warn', 'analyze');
+      return;
+    }
+    if (editor.circuit.revision !== this.miningRevision) {
+      this.app.log(`the sheet changed since the search (revision ${this.miningRevision} → ${editor.circuit.revision}), so the pattern's element indices are stale; run "Find repeated subcircuits" again`, 'warn', 'analyze');
+      this.mining = null;
+      this.renderMining();
+      return;
+    }
+    try {
+      const result = cf.mining.replacePatternWithChip(editor.circuit, editor.lib, editor.chips, pattern, {});
+      editor.replaceSheet(result.circuit, 'mine');
+      for (const note of result.notes) this.app.log(`  ${note}`, 'info', 'analyze');
+      for (const d of result.diagnostics) {
+        if (d.severity === 'error' || d.severity === 'warning') this.app.log(`  ${d.code ?? ''} ${d.message}`, d.severity === 'error' ? 'error' : 'warn', 'analyze');
+      }
+      this.app.log(
+        `replaced ${result.replaced} of ${pattern.count} occurrence(s) with ${result.chipId}: ${result.componentsBefore} component(s) became ${result.componentsAfter}, ${result.netsBefore} net(s) became ${result.netsAfter}`,
+        result.replaced > 0 ? 'ok' : 'warn',
+        'analyze',
+      );
+      if (result.skipped.length > 0) {
+        this.app.log(`  ${result.skipped.length} occurrence(s) skipped: ${result.skipped.slice(0, 3).map((k) => k.reason).join('; ')}${result.skipped.length > 3 ? '; …' : ''}`, 'info', 'analyze');
+      }
+      this.app.view?.invalidate?.();
+      this.mine();
+    } catch (err) {
+      this.app.log(`replacement failed: ${err.code ? err.code + ': ' : ''}${err.message}`, 'error', 'analyze');
+    }
   }
 
   run() {

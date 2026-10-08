@@ -77,7 +77,7 @@ with the command shown.
 | `logic.settle.100` | 3.18 ms, 16.09 M element-evaluations/s (100 elements, 19 levels, 512 vectors) |
 | `logic.settle.1000` | 25.74 ms, 15.54 M element-evaluations/s |
 | `hierarchy.flatten.100` | 4.84 ms, 103.4 k flattened elements/s |
-| `hierarchy.flatten.1000` | 32.75 ms, 152.7 k flattened elements/s |
+| `hierarchy.flatten.1000` | 32.75 ms, 152.7 k flattened elements/s, `expandedTransistors` reported |
 | `electrical.dc.1000` | 28.54 ms, 70.1 k nodes/s (2002 unknowns, 1 iteration, residual 0) |
 | `electrical.transient.100` | 41.74 ms, 2.4 k accepted steps/s |
 | `io.roundtrip.100` | 1.99 ms |

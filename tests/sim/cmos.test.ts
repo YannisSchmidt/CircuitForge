@@ -138,3 +138,53 @@ test('a NAND stack never ties its own drain to its source', () => {
   const low = gateCase('nand_gate', [VDD, VDD]);
   assert(low.out < 0.1, 'NAND(1,1) is at ground');
 });
+
+test('the netlist reports what gate expansion actually did', () => {
+  // Expansion is conditional on two things at once: the flatten option, and the gate's
+  // own `style` parameter being something other than the default `ideal`. When it does
+  // happen, the netlist says so with a count, so a report can be checked against the
+  // elements that are really there.
+  const { b, lib, chips } = builder('expansion-reported');
+  b.ground();
+  const v = b.add('vdc', { dc: VDD }, [0, 0]);
+  b.at(v, '+', 'vin').at(v, '-', 'gnd');
+  const g = b.add('not_gate', { ...SIZE }, [6, 0]);
+  b.at(g, 'IN1', 'vin').at(g, 'OUT', 'y');
+  const nl = flattenCircuit(b.finish({ erc: false }), lib, chips, { expandGates: true });
+
+  const codes = nl.diagnostics.map((d) => d.code);
+  assert(codes.includes('CF6012'), `expected CF6012 reporting the expansion, got: ${codes.join(', ') || 'nothing'}`);
+  assertEqual(nl.expandedGates, 1, 'gates handed to the CMOS expander');
+  assert(nl.expandedTransistors >= 2, `a static CMOS inverter is at least two transistors, got ${nl.expandedTransistors}`);
+  const mosfets = [...nl.kind].filter((k) => k === Kind.Mosfet).length;
+  assert(mosfets >= nl.expandedTransistors, `the counted transistors are in the netlist (${mosfets} MOSFET element(s))`);
+});
+
+test('asking to expand gates that were left ideal says so, and changes nothing', () => {
+  // Regression: the option used to be recorded in the netlist metadata as though it had
+  // taken effect, while a gate at its default style expanded to nothing. A user ticking
+  // "expand gates to transistors" got an unchanged netlist and no word about why.
+  const { b, lib, chips } = builder('expansion-requested-not-done');
+  b.ground();
+  const v = b.add('vdc', { dc: VDD }, [0, 0]);
+  b.at(v, '+', 'vin').at(v, '-', 'gnd');
+  const g = b.add('not_gate', {}, [6, 0]);
+  b.at(g, 'IN1', 'vin').at(g, 'OUT', 'y');
+  const circuit = b.finish({ erc: false });
+
+  // `allowWarnings` because the warning *is* the subject of this test.
+  const asked = flattenCircuit(circuit, lib, chips, { expandGates: true, allowWarnings: true });
+  const plain = flattenCircuit(circuit, lib, chips, { expandGates: false, allowWarnings: true });
+  const askedCodes = asked.diagnostics.map((d) => d.code);
+  assert(askedCodes.includes('CF6013'), `expected CF6013 saying nothing expanded, got: ${askedCodes.join(', ') || 'nothing'}`);
+  const diag = asked.diagnostics.find((d) => d.code === 'CF6013');
+  assert(diag !== undefined, 'CF6013 is present');
+  assertEqual(diag.severity, 'warning', 'an unmet request is a warning, not a note');
+  assert(/style/.test(diag.hint ?? ''), `the hint names the missing condition, got: ${diag.hint ?? '(none)'}`);
+  assertEqual(asked.expandedGates, 0, 'no gate was expanded');
+  assertEqual(asked.gatesLeftIdeal, 1, 'the one gate that stayed ideal is counted');
+  assertEqual(asked.expandedTransistors, 0, 'no transistor was created');
+  assertEqual(asked.elementCount, plain.elementCount, 'the netlist is the same whether or not the unmet option was passed');
+  const plainCodes = plain.diagnostics.map((d) => d.code);
+  assertEqual(plainCodes.includes('CF6012') || plainCodes.includes('CF6013'), false, 'not asking for expansion comments on nothing');
+});

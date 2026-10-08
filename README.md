@@ -44,6 +44,14 @@ produced it named, unused components, redundant connections, combinational loops
 fan-out, slow/hot/power-hungry zones, constraint violations — as coded diagnostics
 (`CF3001`…`CF9002`), not prose.
 
+**Find what a design repeats.** Fan-in cones are grown over the flattened logic, grouped
+by a canonical form, and each block's truth table is *measured* at level 0 and compared
+row by row with the chip library. A block that matches a chip on every row can be
+replaced by an instance of it; one that differs is reported with the number of rows that
+differ and is never substituted. On a flat sheet of 184 full adders built from gates that
+is one five-element block with 184 occurrences, all 184 replaced, 920 components becoming
+184, with every output checked to compute what it computed before.
+
 **Synthesize and optimize.** A behavioural specification (for example `A[7:0]`,
 `B[7:0]` → `Y = A + B`) becomes architectures from a template catalogue, then a seeded
 NSGA-II search with tiered filters — fast logic first, then timing, then electrical,
@@ -96,11 +104,12 @@ These are not aspirations; they are enforced by the reports and checked by tests
 ## Layout
 
 ```
-bin/circuitforge.js    the CLI: help, doctor, list, examples, simulate, analyze,
+bin/circuitforge.js    the CLI: help, doctor, list, examples, simulate, analyze, mine,
                        validate, optimize, synth, export, benchmark, jobs, serve
 src/engine/core/       circuit graph, library, chips, projects, diagnostics
 src/engine/sim/        flattener (SoA netlist), MNA solver, transient, thermal
 src/engine/analysis/   logic vector engine, timing, statistics, analyzer
+src/engine/mining/     repeated subcircuits, chip matching by measured behaviour, replacement
 src/engine/instruments/ fft, spectrum, oscilloscope, meters, signal generator
 src/engine/optim/      specs, genomes, cost, tiered search, NSGA-II, explanations
 src/engine/validate/   the validation pipeline
@@ -113,9 +122,9 @@ src/engine/synthesis/  the 19 reference designs and 24 worked examples
 src/server/            HTTP server and JSON API behind the editor
 src/ui/                the editor state machine and the command registry
 public/                the interface: HTML, CSS and five ES modules
-tests/                 346 tests: unit, integration, simulation, io, export,
-                       analysis, validation, jobs, optimizer, instruments, render,
-                       editor, server, benchmarks, scale
+tests/                 368 tests: unit, integration, simulation, io, export,
+                       analysis, mining, validation, jobs, optimizer, instruments,
+                       render, editor, server, benchmarks, scale
 docs/                  the twelve documents listed below
 ```
 
@@ -135,6 +144,7 @@ circuitforge list                 # the 53 component models and their accuracy
 circuitforge examples             # the 24 worked examples and the readings they must meet
 circuitforge simulate --chip cpu8 --level 0
 circuitforge analyze  --chip ripple_adder --param bits=8
+circuitforge mine     --file sheet.cfproj --replace --out rewritten.json
 circuitforge validate --chip ripple_adder --spec adder --param bits=4
 circuitforge optimize --spec and_not --profile FASTEST --budget 400 --why
 circuitforge synth    --spec mux --param selectBits=2 --profile SMALLEST
@@ -167,6 +177,7 @@ reproduces these; the report states the environment it ran in.
 | Sheet layout | 5.5 k–8.4 k blocks/s |
 | Draw pass | 578 k–702 k drawing operations/s |
 | Optimizer | ~1 k candidate evaluations/s |
+| Repeated-subcircuit mining | 184 gate-level adders in 155 ms; a 375-element CPU in 197 ms |
 
 A million-component sheet is **refused** in this environment, with the reason: roughly
 8.75 GiB of heap against a 1.91 GiB V8 limit at a measured marginal cost of 4.6 KiB
@@ -178,7 +189,7 @@ cost was flat across every size that ran — and the report says how to raise it
 ## Tests
 
 ```bash
-npm test        # 346 tests, about 15 s
+npm test        # 368 tests, about 15 s
 ```
 
 Unit, integration, simulation, regression, serialization, export/import, randomized,
@@ -186,7 +197,9 @@ performance and scale. The suite includes the invariants that are easy to lose: 
 routed wire segment is axis-aligned (checked over 657 branches of seven reference
 designs at two schematic levels), a full adder's truth table is 8/8 through the HTTP
 API, the profiler's phases sum to 100 %, a benchmark's throughput is counted units
-over its best repeat, and a chip with an ERC error cannot be committed.
+over its best repeat, a chip with an ERC error cannot be committed, and 184 repetitions of
+a full adder are found, matched to the library chip by measured behaviour, and replaced
+without changing any output.
 
 ---
 

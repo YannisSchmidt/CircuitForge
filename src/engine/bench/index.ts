@@ -738,22 +738,27 @@ export async function runBenchmarkSuite(options: BenchmarkOptions = {}): Promise
           const { circuit, chip } = chipArray(c.project, n);
           let elements = 0;
           let nodes = 0;
+          let expanded = 0;
           return {
-            what: `${n} instances of chip "${chip}" flattened to primitives, gates expanded to their declared implementation`,
+            what: `${n} instances of chip "${chip}" flattened to primitives, gate expansion enabled`,
             sizeUnit: 'chip instances',
             run: () => {
               const nl = flatten(circuit, c.lib, c.chips, { expandGates: true, ambient: 25 });
               const st = netlistStats(nl);
               elements = st.elements;
               nodes = st.nodes;
+              expanded = nl.expandedTransistors;
             },
             metrics: { sheetComponents: circuit.componentCount(), chip },
             after: () => ({
-              metrics: { flatElements: elements, flatNodes: nodes },
+              metrics: { flatElements: elements, flatNodes: nodes, expandedTransistors: expanded },
               units: elements,
               rateUnit: 'flattened elements/s',
             }),
-            notes: ['Timed per call: the flatten is not cached between repeats, so each repeat is a full descent.'],
+            notes: [
+              'Timed per call: the flatten is not cached between repeats, so each repeat is a full descent.',
+              'Gate expansion is enabled but conditional: a gate becomes a transistor network only when its own `style` parameter is not the default `ideal`. `expandedTransistors` reports how many actually appeared, so this case never claims to have measured something it did not.',
+            ],
           };
         }),
       );

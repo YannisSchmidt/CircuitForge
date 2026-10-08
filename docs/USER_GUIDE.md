@@ -86,6 +86,12 @@ The Simulation dock runs the levels you tick:
   used, and whether the matrix was singular. A solve that did not converge says so in red and
   the voltages shown are labelled as the last iterate.
 - **L3 thermal** solves the lumped RC network and badges hot components on the sheet.
+- **Expand gates to transistors** permits the flatten to lower a gate into its CMOS network, but
+  a gate is only lowered when its own `style` parameter (Inspector) is not the default `ideal` —
+  set it to `cmos_static`. If nothing qualified, the console says so with `CF6013` instead of
+  leaving a ticked box to imply a transistor-level netlist; when gates were expanded, `CF6012`
+  counts them. An expanded gate has no level-0 behaviour, so the truth table goes empty by
+  design: it is now a device network, solved electrically.
 - **Transient** (*Simulate ▸ Transient sweep…*) runs a sweep and sends it to the oscilloscope.
 
 ## The oscilloscope
@@ -110,6 +116,21 @@ critical path and the ones the analyzer reports as unused.
 
 A critical path of 0 ns is reported as a **lower bound** when the elements declare no delay,
 not as "this design is infinitely fast".
+
+*Analyze ▸ Find repeated subcircuits* (`Ctrl+Shift+M`) mines the sheet: each card shows the
+block's shape, how many times it occurs, how many of those occurrences are on this sheet, what
+it computes (a truth table measured at level 0, and whether the measurement was exhaustive),
+and which library chip computes the same thing. **Replace with…** is enabled only when the
+match is identical on every measured row and at least one occurrence is on this sheet; a block
+that differs from a chip is shown with the number of rows that differ and cannot be
+substituted, because substituting it would change what the circuit computes. A block contained
+in a larger reported block is labelled *sub-block of* — a full adder really does contain two
+half adders, and replacing the smaller one first would break the larger. Replacement is an
+edit, so `Ctrl+Z` gives the sheet back.
+
+The search describes the sheet as it was when it ran. Edit the sheet afterwards and the
+patterns are stale — the interface refuses to replace from a stale search and asks you to run
+it again rather than rewriting gates by index into a circuit that has moved on.
 
 *Circuit ▸ Run ERC* lists the electrical rules diagnostics with their codes.
 

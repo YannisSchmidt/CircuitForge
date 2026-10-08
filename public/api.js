@@ -70,6 +70,13 @@ export const api = {
   saveProject: (file, document) => post('/api/project/save', { file, document }),
   simulate: (document, opts) => post('/api/simulate', { document, ...opts }),
   analyze: (document) => post('/api/analyze', { document }),
+  /**
+   * Mine a sheet for repeated subcircuits. Pass `replace: true` (and optionally
+   * `pattern`, `chip`, `limit`) to have the identical matches substituted; the answer
+   * then carries the replaced circuit document and says how many occurrences were
+   * skipped, and why.
+   */
+  mine: (document, opts = {}) => post('/api/mine', { document, ...opts }),
   validate: (body) => post('/api/validate', body),
   optimize: (body) => post('/api/optimize', body),
   synth: (body) => post('/api/synth', body),

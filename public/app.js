@@ -685,6 +685,10 @@ class App {
         this.showDock('analysis');
         this.analysis.selectUnused();
       },
+      'analyze.mine': () => {
+        this.showDock('analysis');
+        this.analysis.mine();
+      },
       'analyze.stats': () => this.showStats(),
       'optimize.run': () => this.optimizeDialog(),
       'optimize.why': () => this.showWhy(),

@@ -96,6 +96,7 @@ export const COMMANDS: Command[] = [
   { id: 'analyze.run', label: 'Analyze circuit', group: 'analyze', key: 'ctrl+shift+a', hint: 'Critical path, unused components, fan-out, redundancy, risk' },
   { id: 'analyze.criticalPath', label: 'Show critical path', group: 'analyze', hint: 'Highlight the longest gate chain and its declared delay' },
   { id: 'analyze.unused', label: 'Select unused components', group: 'analyze', hint: 'Select everything the outputs do not depend on' },
+  { id: 'analyze.mine', label: 'Find repeated subcircuits', group: 'analyze', key: 'ctrl+shift+m', hint: 'Mine the sheet for blocks it repeats, measure what each computes, and offer the matching chip' },
   { id: 'analyze.stats', label: 'Statistics', group: 'analyze', hint: 'Per-circuit counts and measured totals' },
 
   // ---- optimize ----
@@ -137,7 +138,7 @@ export const MENUS: MenuDefinition[] = [
   { id: 'view', label: 'View', items: ['view.fit', 'view.zoomIn', 'view.zoomOut', 'view.zoom100', '-', 'view.grid', 'view.snap', 'view.labels', 'view.theme', '-', 'view.level'] },
   { id: 'circuit', label: 'Circuit', items: ['circuit.open', 'circuit.up', '-', 'circuit.erc', 'circuit.flatten', 'circuit.commitChip', '-', 'circuit.reference'] },
   { id: 'simulate', label: 'Simulate', items: ['sim.run', 'sim.step', 'sim.stop', '-', 'sim.dc', 'sim.transient', 'sim.thermal', '-', 'sim.toggle', 'sim.clock'] },
-  { id: 'analyze', label: 'Analyze', items: ['analyze.run', 'analyze.criticalPath', 'analyze.unused', 'analyze.stats'] },
+  { id: 'analyze', label: 'Analyze', items: ['analyze.run', 'analyze.criticalPath', 'analyze.unused', 'analyze.mine', 'analyze.stats'] },
   { id: 'optimize', label: 'Optimize', items: ['optimize.run', 'optimize.synth', '-', 'optimize.why', 'optimize.apply'] },
   { id: 'jobs', label: 'Jobs', items: ['jobs.show', 'jobs.benchmark', '-', 'jobs.pause', 'jobs.resume', 'jobs.cancel'] },
   { id: 'window', label: 'Window', items: ['window.components', 'window.inspector', '-', 'window.simulation', 'window.scope', 'window.console'] },

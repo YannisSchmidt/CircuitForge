@@ -4,7 +4,7 @@
 
 The Python prototype that this repository started as is retired: it is removed from the tree,
 and the program is now a TypeScript engine with a browser interface and a headless CLI. Every
-entry below is implemented and covered by the 346-test suite.
+entry below is implemented and covered by the 368-test suite.
 
 ### Engine
 
@@ -69,6 +69,28 @@ entry below is implemented and covered by the 346-test suite.
 
 ### Fixed along the way
 
+- `loadProjectText` returns `errors` and `warnings` as *counts* and the messages in
+  `diagnostics`; the CLI iterated the counts, so **every** `--file` load of a saved project died
+  with "number 0 is not iterable" before it read a single component.
+- `expandGates` was recorded in the netlist metadata as though it had taken effect while a gate
+  at its default `style` expanded to nothing, and the interface offered a checkbox labelled
+  "expand gates to transistors" that could not do what it said. The netlist now counts what
+  happened (`expandedGates`, `gatesLeftIdeal`, `expandedTransistors`) and reports it (`CF6012`,
+  `CF6013`); the checkbox, the CLI help and the documents state both conditions.
+- A benchmark case described itself as measuring "gates expanded to their declared
+  implementation" while the circuit it built had no gate that could expand; it now reports the
+  transistor count it actually produced.
+- The server answered a document-only request with a default component library and the reference
+  chip library, a pair that does not know each other, so anything that needed to *place* a chip
+  (mining's replacement among them) refused with "the library has no component spec". Library and
+  chips are now built as a pair.
+- Mining's canonical form used globally refined colours, so each stage of a ripple chain had a
+  different neighbourhood and an eight-bit adder reported eight patterns of one occurrence instead
+  of one pattern of eight; cones that left the block through a *port* did not count that as an
+  output; merging unioned the outputs of the cones instead of recomputing them over the union;
+  budget pruning cut the data path before the carry chain; a single-gate cone was rejected before
+  merging, which is why an XOR and an AND over the same two nets were never seen as the half adder
+  they are; and `minOccurrences: 1` was silently clamped to 2.
 - Three quadratic scans in sheet construction (reference allocation, pin rewiring, empty-net
   pruning): building 10 000 components went from 22.62 s to 79 ms, and the per-component cost
   is now flat from 10 to 100 000.

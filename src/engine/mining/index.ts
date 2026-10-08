@@ -25,15 +25,24 @@
  *      three-input two-output pattern instead of two half patterns that no chip
  *      corresponds to.
  *
- *      STATUS: the merge is implemented and does produce multi-output patterns, but on
- *      a ripple-carry chain it currently recovers a three-element sum/carry fragment
- *      rather than the five-element full adder, because the input budget that stops a
- *      cone walking the carry chain also stops the carry cone admitting the AND that
- *      reads the internal XOR. Consequence, stated plainly: on such a chain the report
- *      offers a *near* match to the full adder with the differing row count, and does
- *      not claim the substitution. Nothing in the engine, the CLI or the interface
- *      depends on this module yet, and it is not exported from the barrel until the
- *      merge recovers the whole block.
+ *      Three details decide whether this works, and each was found by getting it
+ *      wrong first. The labels a cone is described with are refined *inside the cone*
+ *      only — a global refinement encodes the neighbourhood beyond it, and in a ripple
+ *      chain no two stages have the same neighbourhood, so an eight-stage adder would
+ *      report eight patterns of one occurrence instead of one pattern of eight. A net
+ *      that leaves through a *port* is an output even when no element reads it, or the
+ *      sum of a full adder would not count as one. And a cone may borrow one input
+ *      while growing — the carry cone cannot admit the AND that reads the internal XOR
+ *      until that XOR joins, and until then the XOR's own inputs count as external —
+ *      but must fit the budget once complete, and the elements that only fit thanks to
+ *      the allowance are the first to be pruned, which is what stops a cone walking the
+ *      carry chain into the previous stage.
+ *
+ *      Verified: on a flat sheet of 184 full-adder gate clusters the miner reports one
+ *      pattern of 184 occurrences, five elements, three inputs and two outputs, its
+ *      measured truth table is identical to the `full_adder` chip's, and replacing all
+ *      184 takes the sheet from 920 components to 184 with no ERC error and no change
+ *      to the behaviour of any output.
  *   5. Every candidate is measured: its external inputs are driven through all
  *      combinations the level-0 engine can hold in one settle (32 lanes, so up to
  *      five inputs exhaustively) and its outputs sampled. A pattern with more inputs
@@ -80,8 +89,7 @@ export interface MiningOptions {
    * external only until the element driving it joins the cone.
    */
   coneSlack?: number;
-  /** Expand gate primitives into transistors before mining. Default false. */
-  expandGates?: boolean;
+
   ambient?: number;
   /** Merge cones that read the same external nets into one multi-output pattern. Default true. */
   mergeOutputs?: boolean;
@@ -155,6 +163,16 @@ export interface SubcircuitPattern {
   suggestedChip: { id: string; name: string; ports: Array<{ name: string; direction: 'input' | 'output'; width: number }> } | null;
   /** Patterns merged into this one, when it is a merged pattern. */
   mergedFrom: string[];
+  /**
+   * The id of a larger reported pattern that contains every occurrence of this one.
+   *
+   * A full adder is two half adders and an OR, so a sheet of full adders genuinely
+   * contains three findings, each measurable and each matched to a real chip. What
+   * would mislead is presenting them as three independent chances to de-duplicate the
+   * same sheet: replacing the half adders first destroys the full adder they are part
+   * of. Containment is therefore stated, and the larger pattern is the one to act on.
+   */
+  subBlockOf?: string;
   saving: {
     /** Elements removed per occurrence, counting the chip instance as one. */
     elementsPerOccurrence: number;
@@ -228,9 +246,15 @@ interface Adjacency {
   paths: string[];
   refs: string[];
   depths: number[];
+  /**
+   * Nets that leave the circuit through a port. A net driven by a pattern and read by
+   * no *element* is still an output when the sheet exports it — without this, the sum
+   * of a full adder, which nothing else on the sheet reads, would not count as one.
+   */
+  isPortNet: Uint8Array;
 }
 
-function adjacency(graph: LogicGraph): Adjacency {
+export function adjacency(graph: LogicGraph): Adjacency {
   const netCount = graph.netCount;
   const driverOfNet = new Int32Array(netCount).fill(-1);
   const consumersOfNet: number[][] = Array.from({ length: netCount }, () => []);
@@ -254,7 +278,10 @@ function adjacency(graph: LogicGraph): Adjacency {
     depths.push(inst.depth ?? 1);
     for (let e = inst.elementStart; e < inst.elementStart + inst.elementCount; e++) instanceOfElement[e] = i;
   }
-  return { driverOfNet, consumersOfNet, instanceOfElement, paths, refs, depths };
+  const isPortNet = new Uint8Array(netCount);
+  for (const node of graph.inputs ?? []) if (node >= 0 && node < netCount) isPortNet[node] = 1;
+  for (const node of graph.outputs ?? []) if (node >= 0 && node < netCount) isPortNet[node] = 1;
+  return { driverOfNet, consumersOfNet, instanceOfElement, paths, refs, depths, isPortNet };
 }
 
 /**
@@ -264,7 +291,7 @@ function adjacency(graph: LogicGraph): Adjacency {
  * drives it and what it drives, so after `rounds` two elements have the same colour
  * only if their neighbourhoods to that distance look the same.
  */
-function refineColours(graph: LogicGraph, adj: Adjacency, rounds: number): string[] {
+export function refineColours(graph: LogicGraph, adj: Adjacency, rounds: number): string[] {
   let colours = graph.elements.map((e) => `${e.kind}:${e.kind === 'gate' ? e.fn : `${e.inputs.length}/${e.outputs.length}`}:${e.inputs.length}`);
   for (let round = 0; round < rounds; round++) {
     const next: string[] = new Array(colours.length);
@@ -296,7 +323,7 @@ function refineColours(graph: LogicGraph, adj: Adjacency, rounds: number): strin
 }
 
 /** Every net an element reads, data and control alike. */
-function netsReadBy(element: LogicElement): number[] {
+export function netsReadBy(element: LogicElement): number[] {
   const nets = [...element.inputs, ...element.selects];
   if (element.clk >= 0) nets.push(element.clk);
   if (element.rst >= 0) nets.push(element.rst);
@@ -305,7 +332,7 @@ function netsReadBy(element: LogicElement): number[] {
 }
 
 /** How many distinct nets a set of elements reads from outside itself. */
-function externalInputCount(graph: LogicGraph, adj: Adjacency, members: Set<number>): number {
+export function externalInputCount(graph: LogicGraph, adj: Adjacency, members: Set<number>): number {
   const external = new Set<number>();
   for (const index of members) {
     for (const net of netsReadBy(graph.elements[index])) {
@@ -333,9 +360,13 @@ function externalInputCount(graph: LogicGraph, adj: Adjacency, members: Set<numb
  * Elements are returned in index order, so the canonical form of two equal cones is
  * the same string.
  */
-function coneOf(graph: LogicGraph, adj: Adjacency, root: number, depth: number, maxInputs: number, maxSize: number, slack = 1): number[] {
+export function coneOf(graph: LogicGraph, adj: Adjacency, root: number, depth: number, maxInputs: number, maxSize: number, slack = 1): number[] {
   const seen = new Set<number>([root]);
   const distance = new Map<number, number>([[root, 0]]);
+  // Elements admitted only because the temporary allowance covered them. They are the
+  // first to go when the cone has to shrink, which is what keeps a cone on its own
+  // stage instead of walking the carry chain into the previous one.
+  const borrowed = new Set<number>();
   let frontier = [root];
   for (let level = 0; level < depth; level++) {
     // Grow to a fixed point rather than in one pass. Adding an element can make
@@ -363,10 +394,12 @@ function coneOf(graph: LogicGraph, adj: Adjacency, root: number, depth: number, 
           // own inputs count as external. Judging that intermediate state by the final
           // budget would make the full adder unreachable. The cone is still required
           // to fit the budget once it is complete, so nothing over-wide is reported.
-          if (externalInputCount(graph, adj, seen) > maxInputs + slack) {
+          const width = externalInputCount(graph, adj, seen);
+          if (width > maxInputs + slack) {
             seen.delete(driver);
             continue;
           }
+          if (width > maxInputs) borrowed.add(driver);
           distance.set(driver, level + 1);
           next.push(driver);
           grew = true;
@@ -377,7 +410,7 @@ function coneOf(graph: LogicGraph, adj: Adjacency, root: number, depth: number, 
     frontier = [...new Set(next)].sort((a, b) => a - b);
     next = [];
   }
-  return pruneToBudget(graph, adj, seen, distance, root, maxInputs);
+  return pruneToBudget(graph, adj, seen, distance, borrowed, root, maxInputs);
 }
 
 /**
@@ -390,18 +423,35 @@ function coneOf(graph: LogicGraph, adj: Adjacency, root: number, depth: number, 
  * farthest first, with ties broken by index, so the result does not depend on the
  * order the graph happened to be walked in.
  */
-function pruneToBudget(graph: LogicGraph, adj: Adjacency, seen: Set<number>, distance: Map<number, number>, root: number, maxInputs: number): number[] {
+export function pruneToBudget(
+  graph: LogicGraph,
+  adj: Adjacency,
+  seen: Set<number>,
+  distance: Map<number, number>,
+  borrowed: Set<number>,
+  root: number,
+  maxInputs: number,
+): number[] {
   const members = new Set(seen);
+  const dropped = new Set(borrowed);
   let guard = members.size + 1;
   while (members.size > 1 && externalInputCount(graph, adj, members) > maxInputs && guard-- > 0) {
     let victim = -1;
+    let victimBorrowed = false;
     let victimDistance = -1;
     for (const index of members) {
       if (index === root) continue;
+      const isBorrowed = dropped.has(index);
       const d = distance.get(index) ?? 0;
-      if (d > victimDistance || (d === victimDistance && index > victim)) {
-        victimDistance = d;
+      const better =
+        victim < 0 ||
+        (isBorrowed && !victimBorrowed) ||
+        (isBorrowed === victimBorrowed && d > victimDistance) ||
+        (isBorrowed === victimBorrowed && d === victimDistance && index > victim);
+      if (better) {
         victim = index;
+        victimBorrowed = isBorrowed;
+        victimDistance = d;
       }
     }
     if (victim < 0) break;
@@ -412,50 +462,123 @@ function pruneToBudget(graph: LogicGraph, adj: Adjacency, seen: Set<number>, dis
 
 /**
  * A canonical description of a cone: which element plays which role, and what feeds
- * each of its inputs — another cone element, or the k-th net from outside.
+ * each of its inputs — another element of the cone, or the k-th net from outside.
+ *
+ * The labels used are refined **inside the cone only**: an element outside is `ext`,
+ * whatever it is. That is what makes the form portable. A global refinement would
+ * encode the neighbourhood beyond the cone, and in a ripple chain no two stages have
+ * the same neighbourhood — stage 0's carry-in is a port and stage 7's carry-out is a
+ * port, so every stage would hash differently and an eight-stage adder would report
+ * eight patterns of one occurrence instead of one pattern of eight.
+ *
+ * Members are ordered by label rather than by index, so the form does not depend on
+ * where in the netlist a copy happens to sit. External nets are numbered in the order
+ * they are met walking that ordering, which gives every occurrence the same port order
+ * — the order the behaviour is measured in, and the order a replacement wires by.
  */
-function canonicalCone(graph: LogicGraph, adj: Adjacency, cone: number[], colours: string[]): { key: string; externalInputs: number[]; outputs: number[] } {
+export function canonicalCone(graph: LogicGraph, adj: Adjacency, cone: number[]): { key: string; externalInputs: number[]; outputs: number[] } {
   const members = new Set(cone);
-  const order = [...cone];
-  const slot = new Map<number, number>();
-  order.forEach((index, i) => slot.set(index, i));
+  const driverOf = (net: number): number => (net >= 0 && net < adj.driverOfNet.length ? adj.driverOfNet[net] : -1);
+  const symmetric = (element: LogicElement): boolean => element.kind === 'gate' && SYMMETRIC.has(element.fn);
+
+  let label = new Map<number, string>();
+  for (const index of cone) {
+    const element = graph.elements[index];
+    label.set(index, `${element.kind}:${element.kind === 'gate' ? element.fn : `${element.inputs.length}/${element.outputs.length}`}`);
+  }
+  for (let round = 0; round < 3; round++) {
+    const next = new Map<number, string>();
+    for (const index of cone) {
+      const element = graph.elements[index];
+      const fanin = netsReadBy(element).map((net, slot) => {
+        const driver = driverOf(net);
+        return `${slot}:${driver >= 0 && members.has(driver) ? label.get(driver) : 'ext'}`;
+      });
+      const fanout: string[] = [];
+      for (const out of element.outputs) {
+        if (out < 0 || out >= adj.consumersOfNet.length) continue;
+        for (const consumer of adj.consumersOfNet[out]) fanout.push(members.has(consumer) ? label.get(consumer) ?? 'ext' : 'ext');
+      }
+      next.set(index, hash(`${label.get(index)}|${symmetric(element) ? [...fanin].sort().join(',') : fanin.join(',')}|${[...fanout].sort().join(',')}`));
+    }
+    label = next;
+  }
+
+  const order = [...cone].sort((a, b) => {
+    const la = label.get(a) ?? '';
+    const lb = label.get(b) ?? '';
+    return la < lb ? -1 : la > lb ? 1 : a - b;
+  });
+  const slotOf = new Map<number, number>();
+  order.forEach((index, i) => slotOf.set(index, i));
+
   const external: number[] = [];
   const externalSlot = new Map<number, number>();
   const parts: string[] = [];
   for (const index of order) {
     const element = graph.elements[index];
-    const nets: Array<{ net: number; slot: number }> = [];
-    element.inputs.forEach((net, i) => nets.push({ net, slot: i }));
-    element.selects.forEach((net, i) => nets.push({ net, slot: 100 + i }));
-    if (element.clk >= 0) nets.push({ net: element.clk, slot: 200 });
-    if (element.rst >= 0) nets.push({ net: element.rst, slot: 201 });
-    if (element.enable >= 0) nets.push({ net: element.enable, slot: 202 });
-    const encoded = nets.map(({ net, slot: s }) => {
-      const driver = net >= 0 && net < adj.driverOfNet.length ? adj.driverOfNet[net] : -1;
-      if (driver >= 0 && members.has(driver)) return `${s}>${slot.get(driver)}`;
-      if (net < 0) return `${s}>none`;
+    const encoded = netsReadBy(element).map((net, slot) => {
+      const driver = driverOf(net);
+      if (driver >= 0 && members.has(driver)) return `${slot}>${label.get(driver)}`;
+      if (net < 0) return `${slot}>none`;
       if (!externalSlot.has(net)) {
         externalSlot.set(net, external.length);
         external.push(net);
       }
-      return `${s}>x${externalSlot.get(net)}`;
+      return `${slot}>x${externalSlot.get(net)}`;
     });
-    const symmetric = element.kind === 'gate' && SYMMETRIC.has(element.fn);
-    const body = symmetric ? [...encoded].sort().join(' ') : encoded.join(' ');
-    parts.push(`${colours[index]}:${fnName(element)}[${body}]`);
+    const body = symmetric(element) ? [...encoded].sort().join(' ') : encoded.join(' ');
+    parts.push(`${label.get(index)}:${fnName(element)}[${body}]`);
   }
-  // Outputs: nets of cone elements that something outside reads, or that the sheet
-  // exports. Ordered by cone slot then net, so the form is stable.
-  const outputs: number[] = [];
+  void slotOf;
+  return { key: parts.join('|'), externalInputs: external, outputs: patternOutputs(graph, adj, members) };
+}
+
+/**
+ * The nets a set of elements reads from outside itself — its ports as an input.
+ *
+ * Ordered by the element that reads them and then by net, so two equal structures
+ * produce the same order and the same canonical form.
+ */
+export function patternInputs(graph: LogicGraph, adj: Adjacency, members: Set<number> | number[]): number[] {
+  const inside = members instanceof Set ? members : new Set(members);
+  const order = [...inside].sort((a, b) => a - b);
+  const external: number[] = [];
   for (const index of order) {
     const element = graph.elements[index];
-    for (const out of element.outputs) {
-      if (out < 0 || out >= adj.consumersOfNet.length) continue;
-      const outside = adj.consumersOfNet[out].some((c) => !members.has(c));
-      if (outside) outputs.push(out);
+    if (!element) continue;
+    for (const net of netsReadBy(element)) {
+      if (net < 0 || external.includes(net)) continue;
+      const driver = net < adj.driverOfNet.length ? adj.driverOfNet[net] : -1;
+      if (driver < 0 || !inside.has(driver)) external.push(net);
     }
   }
-  return { key: parts.join('|'), externalInputs: external, outputs: outputs.sort((a, b) => a - b) };
+  return external;
+}
+
+/**
+ * The nets a set of elements drives that something outside the set reads, plus the
+ * nets the sheet exports as ports.
+ *
+ * Computed from the member set rather than accumulated from the cones it was built
+ * from, because a net that is an output of one cone can be internal to their union:
+ * the shared `x1` of a full adder is an output of the sum cone and of the carry cone
+ * taken separately, and internal to the adder.
+ */
+export function patternOutputs(graph: LogicGraph, adj: Adjacency, members: Set<number> | number[]): number[] {
+  const inside = members instanceof Set ? members : new Set(members);
+  const outputs: number[] = [];
+  for (const index of inside) {
+    const element = graph.elements[index];
+    if (!element) continue;
+    for (const out of element.outputs) {
+      if (out < 0 || out >= adj.consumersOfNet.length) continue;
+      if (outputs.includes(out)) continue;
+      const readOutside = adj.consumersOfNet[out].some((c) => !inside.has(c));
+      if (readOutside || adj.isPortNet[out] === 1) outputs.push(out);
+    }
+  }
+  return outputs.sort((a, b) => a - b);
 }
 
 /**
@@ -467,7 +590,9 @@ function canonicalCone(graph: LogicGraph, adj: Adjacency, cone: number[], colour
 export function mineSubcircuits(circuit: Circuit, lib: Library, chips?: ChipLibrary, options: MiningOptions = {}): MiningReport {
   const t0 = now();
   const depth = Math.max(1, Math.round(options.depth ?? 3));
-  const minOccurrences = Math.max(2, Math.round(options.minOccurrences ?? 2));
+  // One is allowed and means something different: with `minOccurrences: 1` the report
+  // lists blocks worth turning into a chip, not just blocks worth de-duplicating.
+  const minOccurrences = Math.max(1, Math.round(options.minOccurrences ?? 2));
   const maxPatterns = Math.max(1, Math.round(options.maxPatterns ?? 24));
   const measure = options.measure !== false;
   const matchChips = options.matchChips !== false;
@@ -478,14 +603,25 @@ export function mineSubcircuits(circuit: Circuit, lib: Library, chips?: ChipLibr
   const mergeOutputs = options.mergeOutputs !== false;
   const notes: string[] = [];
 
+  // Expansion is deliberately off, and there is no option to turn it on: mining reads
+  // the logic graph, and a gate expanded into its CMOS network contributes transistors
+  // instead of a logic element, so expanding would delete the very subject of the
+  // analysis. Transistor-level detail is a different question, answered by the
+  // electrical solver, not by this module.
   const netlist = flatten(circuit, lib, chips ?? new ChipLibrary(), {
-    expandGates: options.expandGates === true,
+    expandGates: false,
     ambient: options.ambient ?? 25,
     metadata: true,
   });
   const graph = buildLogicGraph(netlist);
   const adj = adjacency(graph);
   const colours = refineColours(graph, adj, depth);
+
+  if (graph.elements.length === 0) {
+    notes.push(
+      'The flattened circuit contains no logic elements, so there is nothing to mine at this layer: it is either purely analogue (resistors, sources, diodes, transistors) or every gate in it was expanded into a transistor network. Mining reads the logic graph; transistor-level detail is the electrical solver\'s subject, not this module\'s.',
+    );
+  }
 
   // ---- cones at several input budgets --------------------------------------
   //
@@ -554,8 +690,11 @@ export function mineSubcircuits(circuit: Circuit, lib: Library, chips?: ChipLibr
     for (const element of graph.elements) {
       const cone = coneOf(graph, adj, element.index, depth, budget, maxPatternSize, coneSlack);
       conesExamined++;
-      if (cone.length < 2) continue;
-      const canonical = canonicalCone(graph, adj, cone, colours);
+      // A single-element cone is kept as a merge candidate but never reported on its
+      // own: one gate is not a subcircuit. It has to stay a candidate, because two
+      // single-gate cones over the same inputs *are* a block — an XOR and an AND over
+      // a and b are a half adder, and the library has a chip for exactly that.
+      const canonical = canonicalCone(graph, adj, cone);
       if (canonical.externalInputs.length > budget) continue;
       distinctForms.add(canonical.key);
       const record: Cone = { root: element.index, elements: cone, ...canonical };
@@ -599,21 +738,27 @@ export function mineSubcircuits(circuit: Circuit, lib: Library, chips?: ChipLibr
         const first = occurrencesOfForm[0];
         const union = [...new Set(first.flatMap((c) => c.elements))].sort((a, b) => a - b);
         if (union.length < 2 || union.length > maxPatternSize) continue;
+        // Inputs and outputs are recomputed over the union: a net that is an output
+        // of one cone can be internal to the merged pattern, and a merged pattern's
+        // ports are what the block it describes would actually have.
         const record = {
           roots: first.map((c) => c.root),
           elements: union,
-          externalInputs: first[0].externalInputs.slice().sort((a, b) => a - b),
-          outputs: [...new Set(first.flatMap((c) => c.outputs))].sort((a, b) => a - b),
+          externalInputs: patternInputs(graph, adj, union),
+          outputs: patternOutputs(graph, adj, union),
           from: form.split('+'),
         };
         // One record per occurrence, so the pattern reports how often it really occurs.
-        const records = occurrencesOfForm.map((cones) => ({
-          roots: cones.map((c) => c.root),
-          elements: [...new Set(cones.flatMap((c) => c.elements))].sort((a, b) => a - b),
-          externalInputs: cones[0].externalInputs.slice().sort((a, b) => a - b),
-          outputs: [...new Set(cones.flatMap((c) => c.outputs))].sort((a, b) => a - b),
-          from: form.split('+'),
-        }));
+        const records = occurrencesOfForm.map((cones) => {
+          const elements = [...new Set(cones.flatMap((c) => c.elements))].sort((a, b) => a - b);
+          return {
+            roots: cones.map((c) => c.root),
+            elements,
+            externalInputs: patternInputs(graph, adj, elements),
+            outputs: patternOutputs(graph, adj, elements),
+            from: form.split('+'),
+          };
+        });
         void record;
         const list = mergedGroups.get(form);
         if (list) list.push(...records);
@@ -645,6 +790,7 @@ export function mineSubcircuits(circuit: Circuit, lib: Library, chips?: ChipLibr
     for (const [key, cones] of groups) {
       if (cones.length < minOccurrences) continue;
       const first = cones[0];
+      if (first.elements.length < 2) continue;
       if (first.elements.every((e) => claimed.has(e))) continue;
       const occurrences = cones.map((c) => occurrenceOf(graph, adj, c.root, c.elements, c.externalInputs, c.outputs));
       const kinds = first.elements.map((i) => fnName(graph.elements[i])).sort();
@@ -666,11 +812,15 @@ export function mineSubcircuits(circuit: Circuit, lib: Library, chips?: ChipLibr
   }
 
   patterns.sort((a, b) => b.saving.elementsTotal - a.saving.elementsTotal || b.count - a.count);
+  const containment = markSubBlocks(patterns);
+  if (containment.cutShort) {
+    notes.push(`Containment labelling stopped after ${containment.tests} comparison(s): some patterns may be sub-blocks of a larger one without being marked. Nothing reported is wrong, only possibly less organised.`);
+  }
   const kept = patterns.slice(0, maxPatterns);
   if (patterns.length > kept.length) notes.push(`${patterns.length - kept.length} further pattern(s) were found and are not listed; raise maxPatterns to see them.`);
 
   notes.unshift(
-    `Grew ${conesExamined} fan-in cone(s) up to depth ${depth}, bounded at ${maxPatternInputs} external input(s) and ${maxPatternSize} element(s); ${distinctForms.size} distinct form(s), of which ${kept.length} repeat at least ${minOccurrences} time(s).`,
+    `Grew ${conesExamined} fan-in cone(s) up to depth ${depth}, bounded at ${maxPatternInputs} external input(s) and ${maxPatternSize} element(s); ${distinctForms.size} distinct form(s), of which ${kept.length} ${minOccurrences === 1 ? 'appear at least once' : `repeat at least ${minOccurrences} time(s)`}.`,
     'Patterns are found among flattened logic elements. Analogue circuitry is not mined, and a pattern with no distinguished output element is out of reach of this method.',
     'Equality of two cones is decided by colour refinement plus a canonical form: a strong structural test, not a proof of isomorphism. Behaviour, where measured, is what confirms a match.',
   );
@@ -1102,6 +1252,85 @@ function now(): number {
 }
 
 /** A short, honest summary of a mining report, for the CLI and the console dock. */
+/**
+ * Label the patterns that are sub-blocks of a larger reported pattern.
+ *
+ * The test is containment of *occurrences*, not of shapes: every occurrence of the
+ * smaller pattern has to sit inside some occurrence of the larger one. Two patterns can
+ * describe the same gates in different places and neither contains the other, and a
+ * half adder that is not part of any reported full adder is a finding in its own right.
+ *
+ * Candidate occurrences are found through an index from element to the occurrences that
+ * contain it, so the cost follows the number of elements actually shared rather than the
+ * product of the two occurrence counts — a sheet with thousands of repetitions stays
+ * cheap to label.
+ */
+export function markSubBlocks(patterns: SubcircuitPattern[], testBudget = 2_000_000): { tests: number; cutShort: boolean } {
+  const occurrenceSets = patterns.map((p) => p.occurrences.map((o) => new Set(o.elements)));
+  const indexOf = patterns.map((p) => {
+    const index = new Map<number, number[]>();
+    p.occurrences.forEach((o, i) => {
+      for (const e of o.elements) {
+        const list = index.get(e);
+        if (list) list.push(i);
+        else index.set(e, [i]);
+      }
+    });
+    return index;
+  });
+
+  let tests = 0;
+  let cutShort = false;
+  for (let i = 0; i < patterns.length && !cutShort; i++) {
+    const small = patterns[i];
+    if (small.occurrences.length === 0) continue;
+    for (let j = 0; j < patterns.length; j++) {
+      if (i === j) continue;
+      const large = patterns[j];
+      if (large.size <= small.size) continue;
+      const sets = occurrenceSets[j];
+      const index = indexOf[j];
+      let contained = true;
+      for (const candidate of occurrenceSets[i]) {
+        let probe = -1;
+        for (const e of candidate) {
+          probe = e;
+          break;
+        }
+        const hits = index.get(probe);
+        if (!hits) {
+          contained = false;
+          break;
+        }
+        let found = false;
+        for (const k of hits) {
+          if (++tests > testBudget) {
+            // Labelling is a convenience, not a result: it is worth less than a report
+            // that takes seconds. Stop and say that some patterns were not compared.
+            cutShort = true;
+            break;
+          }
+          const superset = sets[k];
+          let inside = true;
+          for (const e of candidate) if (!superset.has(e)) { inside = false; break; }
+          if (inside) { found = true; break; }
+        }
+        if (cutShort) break;
+        if (!found) {
+          contained = false;
+          break;
+        }
+      }
+      if (contained) {
+        small.subBlockOf = large.id;
+        break;
+      }
+    }
+    if (cutShort) break;
+  }
+  return { tests, cutShort };
+}
+
 export function miningToText(report: MiningReport): string {
   const lines: string[] = [];
   lines.push(`Repeated subcircuits in ${report.circuit} (fingerprint ${report.fingerprint})`);
@@ -1123,10 +1352,65 @@ export function miningToText(report: MiningReport): string {
     } else {
       lines.push(`  chip: no library chip computes this; a new one would be called ${pattern.suggestedChip?.name ?? '?'}`);
     }
+    if (pattern.subBlockOf) {
+      lines.push(`  sub-block of [${pattern.subBlockOf}]: every occurrence sits inside that larger pattern, so replacing this one first would break it`);
+    }
     lines.push(`  replacing all ${pattern.saving.replaceable} replaceable occurrence(s) would remove about ${pattern.saving.componentsTotal} component(s)`);
   }
   lines.push('');
   lines.push('Scope:');
   for (const note of report.notes) lines.push(`  - ${note}`);
   return lines.join('\n');
+}
+
+/**
+ * What the miner sees, for inspection and for tests.
+ *
+ * The report describes patterns; this describes the cones the patterns were grown
+ * from, which is the part that decides whether a full adder comes out as one block or
+ * as two fragments. Exposed because a heuristic that cannot be looked at cannot be
+ * argued with.
+ */
+export function inspectCones(circuit: Circuit, lib: Library, chips?: ChipLibrary, options: MiningOptions = {}): Array<{
+  root: number;
+  rootName: string;
+  cone: number[];
+  coneNames: string[];
+  externalInputs: number[];
+  externalInputNames: string[];
+  outputs: number[];
+  outputNames: string[];
+  key: string;
+}> {
+  const depth = Math.max(1, Math.round(options.depth ?? 3));
+  const budget = Math.max(1, Math.round(options.maxPatternInputs ?? 5));
+  const maxSize = Math.max(2, Math.round(options.maxPatternSize ?? 12));
+  const slack = Math.max(0, Math.round(options.coneSlack ?? 1));
+  const netlist = flatten(circuit, lib, chips ?? new ChipLibrary(), { metadata: true });
+  const graph = buildLogicGraph(netlist);
+  const adj = adjacency(graph);
+  const colours = refineColours(graph, adj, depth);
+  const nameOf = (elementIndex: number): string => {
+    const element = graph.elements[elementIndex];
+    const instance = adj.instanceOfElement[element.element];
+    const where = instance >= 0 ? adj.paths[instance] : `#${element.element}`;
+    return `${where}:${fnName(element)}`;
+  };
+  const out = [];
+  for (const element of graph.elements) {
+    const cone = coneOf(graph, adj, element.index, depth, budget, maxSize, slack);
+    const canonical = canonicalCone(graph, adj, cone);
+    out.push({
+      root: element.index,
+      rootName: nameOf(element.index),
+      cone,
+      coneNames: cone.map(nameOf),
+      externalInputs: canonical.externalInputs,
+      externalInputNames: canonical.externalInputs.map((n) => graph.netName(n)),
+      outputs: canonical.outputs,
+      outputNames: canonical.outputs.map((n) => graph.netName(n)),
+      key: canonical.key,
+    });
+  }
+  return out;
 }

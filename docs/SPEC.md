@@ -106,6 +106,21 @@ The patterns module finds repeated subcircuits by fingerprinting 1-hop and
 list of occurrences, and the component count. Patterns can be extracted as
 chips via `extract_pattern_as_chip`.
 
+> **Implementation note.** `src/engine/mining/` goes further than neighbourhood
+> fingerprints, which cannot see a block wider than two hops. It grows fan-in cones at
+> several external-input budgets, describes each with cone-local Weisfeiler–Lehman labels
+> so that the eight stages of a ripple adder are one pattern of eight rather than eight
+> patterns of one, merges cones that read the same external nets into one multi-output
+> block, and *measures* each block at level 0 before comparing it with the chip library.
+> `SubcircuitPattern` carries the shape, the occurrences (with the nets a replacement
+> would wire to), the measured truth table, the matched chip and the number of rows that
+> differ, and what replacing it would save. `replacePatternWithChip` substitutes the
+> occurrences that are on the mined sheet and reports every one it skipped, with the
+> reason. The 184-occurrence example this section asks for is a test:
+> `tests/mining/mining.test.ts` builds the sheet, finds all 184, matches them to
+> `full_adder` by measured behaviour, replaces all 184, and checks that no output
+> changed.
+
 ## Section 10 — Job queue
 
 The job queue has priorities, pause/resume/cancel, and atomic JSON persistence

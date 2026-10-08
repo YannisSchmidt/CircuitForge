@@ -167,9 +167,18 @@ combinational loops (SCC detection via Tarjan), fan-out hotspots, energy hotspot
 (real dissipation from L1 runs), redundancy (isomorphic duplicates), margin
 violations (against declared ratings).
 
-Pattern mining: bounded subgraph isomorphism with canonical labelling (Weisfeiler–
-Lehman refinement + exact check) over fan-in-limited cones, reporting counts and
-offering automatic extraction into a chip + replacement of every occurrence.
+Pattern mining (`src/engine/mining/`): fan-in cones are grown over the flattened logic
+graph at several external-input budgets, and two cones are treated as the same shape when
+their **cone-local** Weisfeiler–Lehman labels agree — local, because a global refinement
+encodes the neighbourhood beyond the cone, and in a ripple chain no two stages have the
+same neighbourhood. Cones that read the same external nets are merged, so a sum cone and a
+carry cone become one full adder rather than two half findings, and each merged block's
+inputs and outputs are recomputed over the union. Equality of shape is a strong structural
+test, **not** a proof of isomorphism, and the report says so: what confirms a match is
+behaviour, measured at level 0 and compared row by row with the chip library. Only an
+identical match is offered for replacement, only for occurrences that live on the mined
+sheet, and blocks contained in a larger reported block are labelled as such so that nobody
+de-duplicates the same gates twice.
 
 ## 6. Synthesis & optimization
 
@@ -245,7 +254,8 @@ budgets, and stress (10 → 10⁶ components). CI-ish entry point: `npm test`.
 src/engine/core/*        data model, library, registry, chips, serialization
 src/engine/sim/*         L0/L1/L2/L3 engines, netlist flattening, solver
 src/engine/devices/*     device model cards & stamps
-src/engine/analysis/*    static analysis, critical path, pattern mining
+src/engine/analysis/*    static analysis, critical path, timing, statistics
+src/engine/mining/*      repeated subcircuits, measured chip matching, replacement
 src/engine/synthesis/*   specification → genome → netlist generators
 src/engine/optim/*       objectives, NSGA-II search, cache, explanation, tiers
 src/engine/jobs/*        queue, persistence, checkpoints, crash recovery

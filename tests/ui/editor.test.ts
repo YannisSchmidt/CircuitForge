@@ -516,3 +516,44 @@ test('a command that does not apply is refused, not run', () => {
   assertEqual(undo.enabled!(state), true, 'after an edit, undo applies');
   assertEqual(commandById('edit.delete')!.enabled!(state), true, 'and so does delete');
 });
+
+test('a bulk sheet replacement is an edit, so it stays undoable', () => {
+  const editor = makeEditor();
+  const first = editor.place('and_gate', 0, 0, { inputs: 2 })!;
+  const second = editor.place('or_gate', 140, 0, { inputs: 2 })!;
+  assert(editor.connect(first.ref, 'OUT', second.ref, 'IN1', 1) !== null, 'the two gates are wired');
+  assertEqual(editor.circuit.componentCount(), 2, 'two components on the sheet');
+  const secondId = editor.byRef(second.ref)!.id;
+
+  // A rewrite arrives as a Circuit, not as a document: that is what the miner's
+  // replacement returns. Loading it through `loadDocument` would clear the undo stack,
+  // which is right for opening a file and wrong for an edit — the user still expects
+  // Ctrl+Z to give back the sheet they had.
+  const rewritten = editor.circuit.clone();
+  rewritten.removeComponent(secondId);
+  editor.replaceSheet(rewritten, 'mine');
+
+  assertEqual(editor.circuit, rewritten, 'the editor holds the circuit it was given, not a copy');
+  assertEqual(editor.circuit.componentCount(), 1, 'and the sheet is the rewritten one');
+  assertEqual(editor.selection.length, 0, 'a selection made on the old sheet means nothing on the new one');
+  assert(editor.canUndo, 'the rewrite left something to undo');
+  assert(editor.undo(), 'undoing it succeeds');
+  assertEqual(editor.circuit.componentCount(), 2, 'the sheet the user had comes back');
+  assert(editor.byRef(first.ref) !== undefined, 'with the first gate');
+  assert(editor.byRef(second.ref) !== undefined, 'and the second');
+});
+
+test('the miner is reachable from the menu, not only from a console', () => {
+  // A feature that only works from the command line is not finished: the point of the
+  // mining work is that a person drawing a sheet can ask what it repeats.
+  const command = commandById('analyze.mine');
+  assert(command !== undefined, 'the command is in the registry');
+  assertEqual(command!.group, 'analyze', 'in the analyze group');
+  const menu = MENUS.find((m) => m.id === 'analyze');
+  assert(menu !== undefined, 'there is an Analyze menu');
+  assert(menu!.items.includes('analyze.mine'), 'and mining is one of its entries');
+  assert(commandsInGroup('analyze').some((c) => c.id === 'analyze.mine'), 'so the group lists it');
+  assert(paletteEntries().some((e) => e.id === 'analyze.mine'), 'and the command palette offers it');
+  assertEqual(command!.key, 'ctrl+shift+m', 'with a shortcut of its own');
+  assertEqual(keymap().get('ctrl+shift+m'), 'analyze.mine', 'that resolves back to it');
+});

@@ -19,6 +19,7 @@ import { assert, assertEqual, suite, test } from '../framework.js';
 import { startServer, type RunningServer } from '../../src/server/index.js';
 import { buildReferenceProject } from '../../src/engine/synthesis/reference.js';
 import { circuitToDocument } from '../../src/engine/io/serialize.js';
+import { CircuitBuilder } from '../../src/engine/core/build.js';
 
 suite('server');
 
@@ -63,6 +64,78 @@ function fullAdderDocument(): Record<string, unknown> {
   assert(chip !== undefined, 'the reference project has a full_adder chip');
   return circuitToDocument(chip!.implementation({})) as unknown as Record<string, unknown>;
 }
+
+/**
+ * A flat sheet of `n` full adders built from gates, as a document.
+ *
+ * Flat, because that is the case in which the occurrences are on the sheet being mined
+ * and may therefore be replaced: an occurrence inside a chip expansion belongs to
+ * another sheet, and the miner says so instead of editing it from here.
+ */
+function repeatedAddersDocument(n: number): Record<string, unknown> {
+  const b = new CircuitBuilder(project.lib, `flat_${n}`);
+  for (let i = 0; i < n; i++) {
+    for (const net of ['a', 'b', 'ci']) b.port(`${net}${i}`.toUpperCase(), 'input', `${net}${i}`, 1);
+    const x1 = b.add('xor_gate', { inputs: 2 }, [i * 220, 0]);
+    const x2 = b.add('xor_gate', { inputs: 2 }, [i * 220 + 60, 0]);
+    const a1 = b.add('and_gate', { inputs: 2 }, [i * 220, 60]);
+    const a2 = b.add('and_gate', { inputs: 2 }, [i * 220 + 60, 60]);
+    const or = b.add('or_gate', { inputs: 2 }, [i * 220 + 120, 60]);
+    b.at(x1, 'IN1', `a${i}`, 1).at(x1, 'IN2', `b${i}`, 1).at(x1, 'OUT', `x1_${i}`, 1);
+    b.at(x2, 'IN1', `x1_${i}`, 1).at(x2, 'IN2', `ci${i}`, 1).at(x2, 'OUT', `s${i}`, 1);
+    b.at(a1, 'IN1', `a${i}`, 1).at(a1, 'IN2', `b${i}`, 1).at(a1, 'OUT', `p${i}`, 1);
+    b.at(a2, 'IN1', `x1_${i}`, 1).at(a2, 'IN2', `ci${i}`, 1).at(a2, 'OUT', `g${i}`, 1);
+    b.at(or, 'IN1', `p${i}`, 1).at(or, 'IN2', `g${i}`, 1).at(or, 'OUT', `co${i}`, 1);
+    b.port(`S${i}`, 'output', `s${i}`, 1);
+    b.port(`CO${i}`, 'output', `co${i}`, 1);
+  }
+  return circuitToDocument(b.finish({ erc: false })) as unknown as Record<string, unknown>;
+}
+
+/** Sum is right, carry is a three-input AND: close to a full adder, and not one. */
+function nearAdderDocument(): Record<string, unknown> {
+  const b = new CircuitBuilder(project.lib, 'near_adder');
+  for (const net of ['a', 'bb', 'ci']) b.port(net.toUpperCase(), 'input', net, 1);
+  const x1 = b.add('xor_gate', { inputs: 2 }, [0, 0]);
+  const x2 = b.add('xor_gate', { inputs: 2 }, [60, 0]);
+  const a3 = b.add('and_gate', { inputs: 3 }, [0, 60]);
+  b.at(x1, 'IN1', 'a', 1).at(x1, 'IN2', 'bb', 1).at(x1, 'OUT', 'x', 1);
+  b.at(x2, 'IN1', 'x', 1).at(x2, 'IN2', 'ci', 1).at(x2, 'OUT', 's', 1);
+  b.at(a3, 'IN1', 'a', 1).at(a3, 'IN2', 'bb', 1).at(a3, 'IN3', 'ci', 1).at(a3, 'OUT', 'co', 1);
+  b.port('S', 'output', 's', 1);
+  b.port('CO', 'output', 'co', 1);
+  return circuitToDocument(b.finish({ erc: false })) as unknown as Record<string, unknown>;
+}
+
+test('the miner answers over HTTP, substitutes an identical match, and refuses a near one', async () => {
+  const document = repeatedAddersDocument(3);
+
+  const found = await post('/api/mine', { document });
+  assertEqual(found.status, 200, 'the miner answers');
+  const report = (found.json().report ?? {}) as Record<string, unknown>;
+  const patterns = (report.patterns ?? []) as Array<Record<string, unknown>>;
+  assert(patterns.length > 0, `it found the repeated block(s): ${patterns.length} pattern(s)`);
+  const adder = patterns.find((p) => ((p.matchedChip ?? {}) as Record<string, unknown>).id === 'full_adder' && ((p.matchedChip ?? {}) as Record<string, unknown>).identical === true);
+  assert(adder !== undefined, 'one of them is measured to be the full adder');
+  assertEqual(adder!.count, 3, 'with all three occurrences');
+  assertEqual(found.json().replacement, undefined, 'nothing is replaced unless that is asked for');
+
+  const replaced = await post('/api/mine', { document, replace: true });
+  assertEqual(replaced.status, 200, 'the substitution is performed on request');
+  const substitution = (replaced.json().replacement ?? {}) as Record<string, unknown>;
+  assertEqual(substitution.chipId, 'full_adder', 'with the chip the behaviour matched');
+  assertEqual(substitution.replaced, 3, 'all three occurrences');
+  assertEqual((substitution.skipped as unknown[]).length, 0, 'none skipped: they are all on this sheet');
+  assertEqual(substitution.componentsBefore, 15, 'fifteen gates in');
+  assertEqual(substitution.componentsAfter, 3, 'three chip instances out');
+  const rewritten = substitution.document as Record<string, unknown> | null;
+  assert(rewritten !== null && typeof rewritten === 'object', 'and the rewritten sheet comes back as a document the editor can take');
+  assertEqual(((rewritten as Record<string, unknown>).components as unknown[]).length, 3, 'holding three components');
+
+  const near = await post('/api/mine', { document: nearAdderDocument(), replace: true, minOccurrences: 1 });
+  assertEqual(near.status, 409, 'a near match is refused, not substituted');
+  assert(/identically|nothing to substitute/i.test(near.text), `and the refusal says why: ${near.text.slice(0, 160)}`);
+});
 
 test('the editor and the engine modules are served as executable JavaScript', async () => {
   const page = await get('/');

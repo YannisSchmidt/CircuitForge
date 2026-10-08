@@ -125,6 +125,9 @@ because reports quote its indices:
   name, `nodeNet[n]` for flat node indices — these three are the safe lookups;
 - `instances[i]` with `elementStart`, `elementCount`, `path`, `ref`, `depth` for
   provenance, populated when `metadata: true`;
+- `expandedGates`, `gatesLeftIdeal` and `expandedTransistors` say what a request to expand
+  gates actually did — see [SIMULATION.md](SIMULATION.md) for the two conditions and the
+  `CF6012`/`CF6013` diagnostics that report them;
 - `groundNode` is 0 by convention; `hasGroundReference` says whether the design declares
   one, and code that needs to know must ask that rather than assume;
 - buses are addressed as `netId * 4096 + lane`.

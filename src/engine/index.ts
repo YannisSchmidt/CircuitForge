@@ -99,6 +99,13 @@ export * as render from './render/index.js';
 /** The editor's logic: the state machine and the command registry the GUI binds to. */
 export * as ui from '../ui/index.js';
 
+/**
+ * Repeated-subcircuit mining, as a namespace: `Pattern`, `Occurrence` and `Match` are
+ * miner vocabulary, and the module's own `hash` and `permutations` helpers would
+ * collide with the core utilities of the same name.
+ */
+export * as mining from './mining/index.js';
+
 import { ENGINE_VERSION } from './util/version.js';
 import { detectPlatform, platformSummary } from './util/platform.js';
 

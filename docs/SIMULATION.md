@@ -72,9 +72,22 @@ Measured: 70 k nodes/s for the DC solve, 2.4 k accepted steps/s for the transien
 ## Level 2 — device detail
 
 The same solver, with device models instead of ideal elements. Gates can be **expanded**
-into CMOS transistor networks (`expandGates: true`), which replaces a behavioural gate
-with the transistors that implement it; the netlist reports how many transistors that
-produced. Device equations and their validity ranges are in [PHYSICS.md](PHYSICS.md).
+into CMOS transistor networks, which replaces a behavioural gate with the transistors that
+implement it. Expansion takes two conditions, and it is worth being precise about them
+because one of them is not a solver option at all:
+
+1. the flatten option `expandGates: true`, which permits it;
+2. the gate's own `style` parameter being something other than the default `ideal` — for
+   example `cmos_static` — which asks for it.
+
+So one netlist can hold ideal gates and transistor-level gates side by side, and a request
+that meets no gate is a request that did nothing. Both outcomes are reported instead of
+left implicit: `CF6012` names the gates expanded and the transistors created (and how many
+gates stayed ideal), and `CF6013` warns when expansion was requested and no gate qualified.
+The counters are `nl.expandedGates`, `nl.gatesLeftIdeal` and `nl.expandedTransistors`. A
+gate that has been lowered to transistors contributes devices and no logic element, so an
+expanded netlist has no level-0 behaviour — which is why the miner flattens with expansion
+off. Device equations and their validity ranges are in [PHYSICS.md](PHYSICS.md).
 
 Level 2 is not a SPICE-compatible simulator: the models are documented subsets, each
 with a card naming what is implemented and what is omitted.

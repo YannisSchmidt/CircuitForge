@@ -32,6 +32,7 @@ import './instruments/instruments.test.js';
 import './bench/benchmark.test.js';
 import './core/builder-scale.test.js';
 import './render/render.test.js';
+import './mining/mining.test.js';
 import './ui/editor.test.js';
 import './server/server.test.js';
 

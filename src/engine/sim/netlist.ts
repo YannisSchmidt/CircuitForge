@@ -123,6 +123,14 @@ export interface FlatNetlist {
   /** Number of transistors synthesised by gate expansion. */
   expandedTransistors: number;
   /**
+   * Number of gate instances that were expanded. Zero with a non-zero request means
+   * expansion was asked for and nothing qualified — which the netlist says out loud
+   * with diagnostic CF6013 rather than leaving the caller to guess.
+   */
+  expandedGates: number;
+  /** Gate instances that kept the default `ideal` style although expansion was asked for. */
+  gatesLeftIdeal: number;
+  /**
    * Piecewise-linear waveform tables, referenced by `SRC_SLOTS.table`.
    *
    * Each table is interleaved `[t0, v0, t1, v1, …]` with strictly increasing t.
@@ -217,6 +225,10 @@ class Builder implements ElementSink {
   waveTables: Float64Array[] = [];
   /** True while a gate is being expanded to its transistor network. */
   private expanding = false;
+  /** Gate instances handed to the CMOS expander. */
+  expandedGates = 0;
+  /** Gate instances that stayed ideal although expansion was requested. */
+  idealGates = 0;
 
   /**
    * Register a PWL table and return its handle.
@@ -238,7 +250,12 @@ class Builder implements ElementSink {
   }
 
   setExpanding(on: boolean): void {
+    if (on && !this.expanding) this.expandedGates++;
     this.expanding = on;
+  }
+
+  countIdealGate(): void {
+    this.idealGates++;
   }
   maxNodes = 1 << 23;
 
@@ -709,8 +726,33 @@ export function flatten(root: Circuit, lib: Library, chips: ChipLibrary, options
     options: opts,
     flattenMs: 0,
     expandedTransistors: b.expandedTransistors,
+    expandedGates: b.expandedGates,
+    gatesLeftIdeal: b.idealGates,
     waveTables: b.waveTables,
   };
+  // Flattening with `expandGates` on is a *request*, not a result: a gate only expands
+  // when its own `style` parameter is something other than the default `ideal`. Saying
+  // so here is what keeps a user who ticks "expand gates to transistors" and gets an
+  // unchanged netlist from believing the option silently did something.
+  // A netlist with no gates in it has nothing to say about gate expansion: a resistive
+  // divider flattened with the option on is not a request that went unmet, it is a
+  // request that does not apply. Only gates that stayed ideal are worth reporting.
+  if (opts.expandGates && b.expandedGates + b.idealGates > 0) {
+    if (b.expandedTransistors > 0) {
+      const also = b.idealGates > 0 ? `, and ${b.idealGates} gate instance(s) kept the default ideal style` : '';
+      b.diagnostics.push(
+        info('CF6012', `${b.expandedGates} gate instance(s) expanded into a CMOS transistor network, ${b.expandedTransistors} transistor(s) in total${also}`, {
+          hint: 'A gate expands only when its own `style` parameter is not the default `ideal`, so one netlist can hold both ideal gates and transistor-level gates.',
+        }),
+      );
+    } else {
+      b.diagnostics.push(
+        warn('CF6013', `gate expansion was requested but no gate expanded: ${b.idealGates} gate instance(s) kept the default ideal style`, {
+          hint: 'A gate expands only when its own `style` parameter is not the default `ideal` (for example `cmos_static`). Set `style` on the gates, or leave expansion off.',
+        }),
+      );
+    }
+  }
   netlist.fingerprint = netlistFingerprint(netlist);
   netlist.flattenMs = Date.now() - t0;
   h.end();
