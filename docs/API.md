@@ -423,6 +423,10 @@ replacePatternWithChip(circuit, lib, chips, pattern, opts?: {
   chipId?, limit?
 }): ReplaceResult
 
+extractPatternAsChip(circuit, lib, chips, pattern, opts?: {
+  chipId?, name?, description?, occurrence?, maxMeasuredInputs?
+}): ExtractResult  // copied, ERC-checked, re-measured, then registered
+
 miningToText(report): string
 markSubBlocks(patterns): { tests: number, cutShort: boolean }
 inspectCones(circuit, lib, chips?, opts?): unknown[]   // what the miner sees, for tests
@@ -435,7 +439,18 @@ to), `behaviour` (`rows`, `complete`, `measured`, and the `reason` when it was n
 (`id`, `version`, `identical`, `differingRows`, `note`), `suggestedChip`, `subBlockOf` and
 `saving` (`replaceable`, `componentsTotal`, …). `ReplaceResult` carries the rewritten `circuit`,
 `replaced`, `skipped[]` with a reason each, before/after component and net counts, `diagnostics`
-and `notes`.
+and `notes`. Even an explicit `chipId` override is measured against the pattern first: a near match
+or an unmeasured block is refused with engine diagnostic `CF8024`; the HTTP wrapper returns `409 CF409`. `extractPatternAsChip` returns the extracted `chip`, its implementation circuit,
+its measured table, `identical`, `differingRows`, diagnostics and notes. It promotes boundary nets
+to ordered ports, refuses an occurrence inside another chip or a pattern with no exhaustive
+measurement (the bit-parallel L0 engine exhaustively measures up to five inputs; a wider
+pattern is not measured and cannot be extracted). DFF/latch patterns are also not measured:
+one settle does not exercise clock transitions, and a static snapshot cannot prove equivalent
+state machines. The extraction checks ERC plus every supported combinational truth-table row
+**before** registration in both `ChipLibrary` and `Library`. It does not infer parameters or
+metrics; the extracted chip is the fixed component-level implementation of that occurrence.
+This is a level-0 equivalence check, not timing, power, device-level or thermal sign-off: re-run
+those analyses after replacement when they matter.
 
 There is deliberately no `expandGates` option here: mining reads the logic graph, and a gate
 lowered to transistors is not a logic element.
@@ -457,10 +472,18 @@ under `/api/`: `health`, `library`, `chips`, `examples`, `specs`, `profiles`, `p
 where there is one, a hint.
 
 `POST /api/mine` takes a circuit document and the miner's options, and answers with the report.
-With `replace: true` it also substitutes the identical matches — optionally `pattern`, `chip` and
-`limit` — and returns the rewritten circuit document, the counts, and every skipped occurrence
-with its reason. Asking it to replace a block that is *not* identical to a chip is a `409 CF409`,
-not a silent approximation. Because placing a chip needs that chip's component spec, the server
-builds the component library and the chip library as a pair (`libraryPair`): a document-only
-request is answered with the reference project's two libraries, and a request that brings its own
-chips gets their specs registered into a fresh library.
+With `extract: true` it copies one on-sheet occurrence, exhaustively verifies the implementation,
+and returns its `ChipDocument`, implementation document, ports, measurements and diagnostics.
+The chip is registered only in the two libraries built for that request; the API is stateless, so
+the client persists it by saving the returned chip or adding it to a project. With
+`extract: true, replace: true`, the same request replaces the other occurrences with that new
+chip and also returns the rewritten circuit document. Without extraction, `replace: true`
+substitutes only identical matches — optionally `pattern`, `chip` and `limit` — and returns the
+rewritten circuit document, the counts, and every skipped occurrence with its reason. Asking it
+to replace a block that is *not* identical to a chip is a `409 CF409`, not a silent approximation.
+An unmeasured, partial, or non-extractable block also returns 409 with the engine's reason and
+hint. Because placing a chip needs that chip's component spec, the server builds the component
+library and the chip library as a pair (`libraryPair`): a document-only request is answered with
+the reference project's two libraries. A request that brings its own `ChipDocument[]` is loaded
+through the dependency-aware project deserializer, which rebuilds runtime `Chip` objects and
+registers their component specs; raw JSON objects are never inserted directly into `ChipLibrary`.

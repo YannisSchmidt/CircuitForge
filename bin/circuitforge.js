@@ -551,10 +551,16 @@ function cmdHelp(cf, flags, positional) {
   out.push('  --depth N              fan-in cone depth that defines a pattern (3)');
   out.push('  --max-inputs N         widest cone to consider, in external inputs (5)');
   out.push('  --max N                cap on patterns reported, best first (24)');
-  out.push('  --pattern ID           which pattern to act on with --replace');
-  out.push('  --replace              replace identical matches with the chip they matched');
-  out.push('  --chip ID              chip to instantiate instead of the matched one');
+  out.push('  --pattern ID           which pattern to act on with --replace or --extract');
+  out.push('  --extract              build a chip out of one occurrence and register it');
+  out.push('  --name NAME            display name for the extracted chip');
+  out.push('  --occurrence N         which occurrence the extracted chip is built from (first on sheet)');
+  out.push('  --replace              replace occurrences with the chip they matched, or the extracted one');
+  out.push('  --chip ID              select a chip implementation as the circuit to mine');
+  out.push('  --as-chip ID           id for a newly extracted chip');
+  out.push('  --replace-with ID      use this chip only if its measured truth table matches exactly');
   out.push('  --limit N              replace at most N occurrences');
+  out.push('  --out FILE             save the result; with --extract, a full .cfproj with the new chip');
   out.push('  --host ADDR            bind address (0.0.0.0)');
   out.push('  --no-open              do not try to open a browser');
   out.push('');
@@ -1253,21 +1259,79 @@ async function cmdMine(cf, flags, positional) {
     matchChips: !bool(flags, 'no-match'),
   });
 
+  const wantExtract = flags.extract !== undefined && flags.extract !== false;
   const wantReplace = flags.replace !== undefined && flags.replace !== false;
-  let replacement = null;
-  if (wantReplace) {
-    const patternId = str(flags, 'pattern');
-    const candidates = report.patterns.filter((p) => p.matchedChip?.identical || patternId);
-    const pattern = patternId ? report.patterns.find((p) => p.id === patternId) : candidates[0];
+  const patternId = str(flags, 'pattern');
+  const named = patternId ? report.patterns.find((p) => p.id === patternId) : undefined;
+  const invalidPattern = !!patternId && !named;
+  const actionErrors = [];
+  if (invalidPattern) {
+    const message = `no pattern with id "${patternId}" in this report; the ids are printed in square brackets above. No other pattern will be substituted instead.`;
+    warn(message);
+    actionErrors.push({ action: 'pattern', message });
+  }
+
+  // ---- extract: build a chip out of one occurrence -------------------------
+  let extraction = null;
+  if (wantExtract) {
+    const pattern = invalidPattern ? undefined : named ?? report.patterns.find((p) => p.saving.replaceable > 0) ?? report.patterns[0];
     if (!pattern) {
-      warn('nothing to replace: no pattern matched a chip identically. `mine` reports near matches with how many rows differ, and never substitutes on a near match.');
+      warn('nothing to extract: this report has no pattern in it');
+    } else {
+      extraction = cf.mining.extractPatternAsChip(subject.circuit, subject.lib, subject.chips, pattern, {
+        chipId: str(flags, 'as-chip') ?? undefined,
+        name: str(flags, 'name') ?? undefined,
+        occurrence: flags.occurrence === undefined ? undefined : num(flags, 'occurrence', 0),
+      });
+      extraction.patternId = pattern.id;
+      extraction.description = pattern.description;
+      extraction.ports = extraction.chip ? extraction.chip.def.ports.map((pt) => ({ name: pt.name, direction: pt.direction, width: pt.width })) : [];
+      for (const d of extraction.diagnostics) {
+        if (d.severity === 'error') warn(`  ${d.code} ${d.message}${d.hint ? ` — ${d.hint}` : ''}`);
+      }
+    }
+  }
+
+  const extractionRefused = wantExtract && !extraction?.chip;
+  if (extractionRefused) {
+    const message = extraction?.diagnostics.find((d) => d.severity === 'error')?.message ?? 'there was no eligible pattern to extract';
+    actionErrors.push({ action: 'extract', message });
+  }
+
+  // ---- replace: substitute every occurrence on this sheet ------------------
+  let replacement = null;
+  let replacementRefused = false;
+  if (wantReplace && wantExtract && !extraction?.chip) {
+    replacementRefused = true;
+    const message = 'replacement was not attempted because the requested extraction did not produce a verified chip';
+    warn(message);
+    actionErrors.push({ action: 'replace', message });
+  } else if (wantReplace) {
+    // With an extraction in hand the intent is obvious: replace the block that was just
+    // cut out with the chip it became. Without one, only an identical match qualifies —
+    // a near match is reported with how many rows differ and never substituted.
+    const extracted = extraction?.chip ? report.patterns.find((p) => p.id === extraction.patternId) : undefined;
+    const pattern = invalidPattern ? undefined : named ?? extracted ?? report.patterns.find((p) => p.matchedChip?.identical && p.saving.replaceable > 0);
+    if (!pattern) {
+      replacementRefused = true;
+      const message = 'nothing to replace: no on-sheet pattern matched a chip identically. `mine` reports near matches with how many rows differ and never substitutes on a near match; pass --extract to build the chip first.';
+      warn(message);
+      actionErrors.push({ action: 'replace', message });
     } else {
       replacement = cf.mining.replacePatternWithChip(subject.circuit, subject.lib, subject.chips, pattern, {
-        chipId: str(flags, 'chip') ?? undefined,
+        chipId: str(flags, 'replace-with') ?? (extraction?.chip ? extraction.chipId : undefined),
         limit: flags.limit === undefined ? undefined : num(flags, 'limit', 0) || undefined,
       });
       replacement.patternId = pattern.id;
       replacement.description = pattern.description;
+      replacementRefused = replacement.replaced === 0;
+      if (replacementRefused) {
+        const refusal = replacement.notes.find((note) => note.startsWith('nothing was replaced:'));
+        const message = refusal
+          ? refusal.replace(/^nothing was replaced: /, '').replace(/\.$/, '')
+          : replacement.skipped[0]?.reason ?? 'no on-sheet occurrence was replaced';
+        actionErrors.push({ action: 'replace', message });
+      }
     }
   }
 
@@ -1277,6 +1341,26 @@ async function cmdMine(cf, flags, positional) {
         source: subject.source,
         name: subject.name,
         report,
+        actionErrors,
+        extraction: extraction
+          ? {
+              patternId: extraction.patternId,
+              description: extraction.description,
+              chipId: extraction.chipId,
+              extracted: extraction.chip !== null,
+              version: extraction.chip ? extraction.chip.def.version : null,
+              name: extraction.chip ? extraction.chip.def.name : null,
+              ports: extraction.ports,
+              chipDocument: extraction.chip ? cf.chipToDocument(extraction.chip) : null,
+              identical: extraction.identical,
+              differingRows: extraction.differingRows,
+              measuredRows: extraction.measured ? extraction.measured.rows : null,
+              complete: extraction.measured ? extraction.measured.complete : null,
+              diagnostics: extraction.diagnostics,
+              notes: extraction.notes,
+              implementation: extraction.implementation ? cf.circuitToDocument(extraction.implementation) : null,
+            }
+          : null,
         replacement: replacement
           ? {
               patternId: replacement.patternId,
@@ -1290,37 +1374,78 @@ async function cmdMine(cf, flags, positional) {
               netsAfter: replacement.netsAfter,
               diagnostics: replacement.diagnostics,
               notes: replacement.notes,
+              document: replacement.replaced > 0 ? cf.circuitToDocument(replacement.circuit) : null,
             }
           : null,
       },
       flags,
     );
-    return 0;
+    return extractionRefused || replacementRefused || invalidPattern ? 1 : 0;
   }
 
   const lines = [`REPEATED SUBCIRCUITS — ${subject.name} (from ${subject.source})`, '', cf.mining.miningToText(report)];
+  if (extraction) {
+    lines.push('', extraction.chip ? `Extracted ${extraction.patternId} (${extraction.description}) as a chip:` : `Extraction of ${extraction.patternId} (${extraction.description}) was refused:`);
+    for (const note of extraction.notes) lines.push(`  - ${note}`);
+    if (extraction.chip) {
+      lines.push(`  chip ${extraction.chipId} v${extraction.chip.def.version}: ${extraction.ports.map((pt) => `${pt.name} (${pt.direction}, ${pt.width})`).join(', ')}`);
+      lines.push(`  re-measured after the copy: ${extraction.measured.rows.length} row(s)${extraction.measured.complete ? ' exhaustively' : ' sampled'}, ${extraction.differingRows} differing from the pattern`);
+      if (!str(flags, 'out')) lines.push('  Nothing was saved: pass --out <file.cfproj> to keep the extracted chip and its source sheet.');
+    }
+  }
   if (replacement) {
     lines.push('', `Replacement of ${replacement.patternId} (${replacement.description}) with ${replacement.chipId}:`);
     for (const note of replacement.notes) lines.push(`  - ${note}`);
     lines.push(`  ${replacement.componentsBefore} component(s) -> ${replacement.componentsAfter}, ${replacement.netsBefore} net(s) -> ${replacement.netsAfter}`);
-    const errors = replacement.diagnostics.filter((d) => d.severity === 'error');
-    lines.push(`  ERC after replacement: ${errors.length} error(s), ${replacement.diagnostics.filter((d) => d.severity === 'warning').length} warning(s)`);
+    const refusal = replacement.diagnostics.find((d) => d.code === 'CF8024');
+    if (refusal) {
+      lines.push(`  Replacement refused before editing: ${refusal.message}${refusal.hint ? ` — ${refusal.hint}` : ''}`);
+    } else {
+      const errors = replacement.diagnostics.filter((d) => d.severity === 'error');
+      lines.push(`  ERC after replacement: ${errors.length} error(s), ${replacement.diagnostics.filter((d) => d.severity === 'warning').length} warning(s)`);
+    }
     if (replacement.replaced > 0) {
       const out = str(flags, 'out');
       const document = cf.circuitToDocument(replacement.circuit);
-      if (out) {
+      if (out && !extraction?.chip) {
         lines.push('', `The replaced sheet was written as a circuit document.`);
         emit(`${lines.join('\n')}\n`, { ...flags, out: undefined }, 'mining');
         emitJson(document, flags);
         return 0;
       }
-      lines.push('', 'Nothing was written: pass --replace with --out <file.json> to keep the replaced sheet.');
+      if (!out && !extraction?.chip) lines.push('', 'Nothing was written: pass --replace with --out <file.json> to keep the replaced sheet.');
     }
   } else if (wantReplace) {
     lines.push('', 'No replacement was performed.');
   }
+
+  // `--extract --out` is a durable operation, not just a report: write a project file
+  // containing the verified chip and the source sheet (or the sheet rewritten with it).
+  // `--replace --out` without extraction keeps the established circuit-document format.
+  const out = str(flags, 'out');
+  if (out && wantExtract && !extraction?.chip) {
+    lines.push('', 'No project file was written because extraction was refused.');
+    emit(`${lines.join('\n')}\n`, { ...flags, out: undefined }, 'mining');
+    return 1;
+  }
+  if (out && replacementRefused && !extraction?.chip) {
+    lines.push('', 'No rewritten circuit file was written because the requested replacement was refused.');
+    emit(`${lines.join('\n')}\n`, { ...flags, out: undefined }, 'mining');
+    return 1;
+  }
+  if (out && extraction?.chip) {
+    const savedCircuit = replacement?.replaced > 0 ? replacement.circuit : subject.circuit;
+    const savedProject = cf.saveProjectText(subject.project, {
+      circuit: savedCircuit,
+      notes: `Extracted ${extraction.chipId} from ${subject.name}; implementation re-measured identical to ${extraction.patternId}.`,
+    });
+    lines.push('', `Project file written to ${out}; it contains the extracted chip and ${replacement?.replaced > 0 ? 'the rewritten sheet' : 'the original sheet'}.`);
+    emit(`${lines.join('\n')}\n`, { ...flags, out: undefined }, 'mining');
+    emit(savedProject, flags, 'project file');
+    return replacementRefused || invalidPattern ? 1 : 0;
+  }
   emit(`${lines.join('\n')}\n`, flags, 'mining');
-  return 0;
+  return extractionRefused || replacementRefused || invalidPattern ? 1 : 0;
 }
 
 async function cmdValidate(cf, flags, positional) {

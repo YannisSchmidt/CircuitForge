@@ -35,6 +35,7 @@ import './render/render.test.js';
 import './mining/mining.test.js';
 import './ui/editor.test.js';
 import './server/server.test.js';
+import './cli/mining-cli.test.js';
 
 const args = process.argv.slice(2);
 const filter = args.find((a) => a.startsWith('--filter='))?.slice('--filter='.length);

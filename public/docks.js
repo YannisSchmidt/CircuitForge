@@ -1104,11 +1104,15 @@ export class AnalysisPane {
       else if (action === 'save') this.save();
       return;
     });
-    // Replacement is offered per pattern, inside the mining cards.
+    // Replacement and extraction are offered per pattern, inside the mining cards.
     root.addEventListener('click', (e) => {
-      const el = e.target.closest('[data-mine-replace]');
-      if (!el || el.disabled) return;
-      this.replacePattern(el.dataset.mineReplace);
+      const replace = e.target.closest('[data-mine-replace]');
+      if (replace && !replace.disabled) {
+        this.replacePattern(replace.dataset.mineReplace);
+        return;
+      }
+      const extract = e.target.closest('[data-mine-extract]');
+      if (extract && !extract.disabled) this.extractPattern(extract.dataset.mineExtract);
     });
   }
 
@@ -1164,6 +1168,10 @@ export class AnalysisPane {
           : `<span class="badge warn">differs from ${esc(chip.id)} on ${chip.differingRows} row(s)</span>`
         : `<span class="badge">no chip computes this — a new one would be ${esc(p.suggestedChip?.name ?? '?')}</span>`;
       const replaceable = p.saving.replaceable > 0 && chip?.identical && !p.subBlockOf;
+      // Extraction needs an occurrence on this sheet to copy, and a measured pattern to
+      // check the copy against: an unmeasured block cannot be verified, so it is not
+      // offered as a chip.
+      const extractable = p.saving.replaceable > 0 && p.behaviour?.measured === true && p.behaviour?.complete === true;
       const table = p.behaviour?.rows?.length
         ? `<div class="group-title">Measured truth table</div><pre class="code" style="max-height:96px">${esc(p.behaviour.rows.slice(0, 32).join(' '))}${p.behaviour.rows.length > 32 ? ' …' : ''}</pre>`
         : '';
@@ -1189,12 +1197,61 @@ export class AnalysisPane {
           ${table}
           <div style="display:flex;gap:6px;align-items:center;margin-top:6px;flex-wrap:wrap">
             <button data-mine-replace="${esc(p.id)}" ${replaceable ? '' : 'disabled'}>${chip?.identical ? `Replace with ${esc(chip.id)}` : 'No identical chip'}</button>
+            <button data-mine-extract="${esc(p.id)}" ${extractable ? '' : 'disabled'} title="${extractable ? `Build a chip out of one occurrence, measure it again to prove it computes the same thing, and register it in both libraries. Afterwards the search matches this block against the new chip, and replacement becomes available.` : p.behaviour?.measured ? 'No occurrence of this pattern is on this sheet' : 'The block was not measured, so a copy could not be verified'}">Save as new chip</button>
             <span class="note">${esc(why)}</span>
           </div>
         </div>
       </div>`;
     });
     host.innerHTML = `<div class="card"><header>Repeated subcircuits <span class="badge">${r.elements} logic element(s) · ${r.ms.toFixed(1)} ms</span></header><div class="body"><div class="empty">Blocks the sheet repeats, what each one computes (measured at level 0), and the library chip that computes the same thing. Equality of shape is a strong test but not a proof of isomorphism; the measured truth table is what confirms a match.</div></div></div>${cards.join('')}`;
+  }
+
+  /**
+   * Build a chip out of one occurrence of a pattern.
+   *
+   * This is the other half of de-duplication: matching only helps when somebody already
+   * wrote a chip for the block a design repeats. The engine copies the components, turns
+   * the nets that crossed the boundary into ports, and then **measures the copy** — if it
+   * does not reproduce the pattern's truth table row for row, nothing is registered and
+   * the console says how many rows differ.
+   */
+  extractPattern(patternId) {
+    const editor = this.app.editor;
+    const pattern = this.mining?.patterns.find((p) => p.id === patternId);
+    if (!pattern) {
+      this.app.log(`no mined pattern "${patternId}" — run the search again`, 'warn', 'analyze');
+      return;
+    }
+    if (editor.circuit.revision !== this.miningRevision) {
+      this.app.log(`the sheet changed since the search (revision ${this.miningRevision} → ${editor.circuit.revision}), so the pattern's element indices are stale; run "Find repeated subcircuits" again`, 'warn', 'analyze');
+      this.mining = null;
+      this.renderMining();
+      return;
+    }
+    try {
+      const result = cf.mining.extractPatternAsChip(editor.circuit, editor.lib, editor.chips, pattern, {});
+      for (const note of result.notes) this.app.log(`  ${note}`, 'info', 'analyze');
+      for (const d of result.diagnostics) {
+        if (d.severity === 'error') this.app.log(`  ${d.code ?? ''} ${d.message}${d.hint ? ` — ${d.hint}` : ''}`, 'error', 'analyze');
+        else if (d.severity === 'warning') this.app.log(`  ${d.code ?? ''} ${d.message}`, 'warn', 'analyze');
+      }
+      if (!result.chip) {
+        this.app.log(`extraction refused: the chip was not registered`, 'warn', 'analyze');
+        return;
+      }
+      const ports = result.chip.def.ports.map((pt) => `${pt.name} (${pt.direction})`).join(', ');
+      this.app.log(
+        `chip ${result.chipId} v${result.chip.def.version} created from ${pattern.id} and verified by measurement (${result.measured.rows.length} row(s), ${result.differingRows} differing): ${ports}`,
+        'ok',
+        'analyze',
+      );
+      this.app.palette?.render();
+      // Re-mining is what makes the new chip useful: the same block now matches a chip in
+      // the library identically, so the replacement button enables itself.
+      this.mine();
+    } catch (err) {
+      this.app.log(`extraction failed: ${err.code ? err.code + ': ' : ''}${err.message}`, 'error', 'analyze');
+    }
   }
 
   /**

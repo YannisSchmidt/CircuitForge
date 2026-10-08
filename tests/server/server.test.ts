@@ -132,9 +132,106 @@ test('the miner answers over HTTP, substitutes an identical match, and refuses a
   assert(rewritten !== null && typeof rewritten === 'object', 'and the rewritten sheet comes back as a document the editor can take');
   assertEqual(((rewritten as Record<string, unknown>).components as unknown[]).length, 3, 'holding three components');
 
-  const near = await post('/api/mine', { document: nearAdderDocument(), replace: true, minOccurrences: 1 });
+  const nearDocument = nearAdderDocument();
+  const near = await post('/api/mine', { document: nearDocument, replace: true, minOccurrences: 1 });
   assertEqual(near.status, 409, 'a near match is refused, not substituted');
   assert(/identically|nothing to substitute/i.test(near.text), `and the refusal says why: ${near.text.slice(0, 160)}`);
+
+  // An explicit override is not a bypass. Even if the caller names `full_adder`, the
+  // server measures that selected chip against the requested pattern before editing.
+  const nearReport = await post('/api/mine', { document: nearDocument, minOccurrences: 1 });
+  const reportPatterns = (nearReport.json().report as Record<string, unknown>).patterns as Array<Record<string, unknown>>;
+  const wrongCarry = reportPatterns.find((p) => p.inputs === 3 && p.outputs === 2 && (p.matchedChip as Record<string, unknown> | null)?.id === 'full_adder');
+  assert(wrongCarry !== undefined, 'the near-carry pattern was measured and matched to the adder only approximately');
+  const explicit = await post('/api/mine', { document: nearDocument, minOccurrences: 1, pattern: wrongCarry!.id, chip: 'full_adder', replace: true });
+  assertEqual(explicit.status, 409, 'explicit chip selection also refuses a measured near match');
+  assert(/differs from the pattern/i.test(explicit.text), `the response reports the measured mismatch: ${explicit.text.slice(0, 200)}`);
+});
+
+/** `n` copies of a block no library chip computes, so extraction is the only way to de-duplicate it. */
+function repeatedOddAddersDocument(n: number): Record<string, unknown> {
+  const b = new CircuitBuilder(project.lib, `odd_${n}`);
+  for (let i = 0; i < n; i++) {
+    for (const net of ['a', 'b', 'ci']) b.port(`${net}${i}`.toUpperCase(), 'input', `${net}${i}`, 1);
+    const x1 = b.add('xor_gate', { inputs: 2 }, [i * 240, 0]);
+    const x2 = b.add('xor_gate', { inputs: 2 }, [i * 240 + 60, 0]);
+    const a1 = b.add('and_gate', { inputs: 2 }, [i * 240, 60]);
+    const o1 = b.add('or_gate', { inputs: 2 }, [i * 240 + 120, 60]);
+    b.at(x1, 'IN1', `a${i}`, 1).at(x1, 'IN2', `b${i}`, 1).at(x1, 'OUT', `x_${i}`, 1);
+    b.at(x2, 'IN1', `x_${i}`, 1).at(x2, 'IN2', `ci${i}`, 1).at(x2, 'OUT', `s${i}`, 1);
+    b.at(a1, 'IN1', `a${i}`, 1).at(a1, 'IN2', `x_${i}`, 1).at(a1, 'OUT', `g${i}`, 1);
+    b.at(o1, 'IN1', `g${i}`, 1).at(o1, 'IN2', `ci${i}`, 1).at(o1, 'OUT', `co${i}`, 1);
+    b.port(`S${i}`, 'output', `s${i}`, 1);
+    b.port(`CO${i}`, 'output', `co${i}`, 1);
+  }
+  return circuitToDocument(b.finish({ erc: false })) as unknown as Record<string, unknown>;
+}
+
+function repeatedSequentialDocument(): Record<string, unknown> {
+  const b = new CircuitBuilder(project.lib, 'two rising-edge register blocks');
+  for (let i = 0; i < 2; i++) {
+    for (const pin of ['d', 'clk', 'rst']) b.port(`${pin.toUpperCase()}${i}`, 'input', `${pin}${i}`, 1);
+    const dff = b.add('dff', { edge: 'rising', resetActive: 'high', initial: '0' }, [i * 120, 0]);
+    const inv = b.add('not_gate', {}, [i * 120 + 60, 0]);
+    b.at(dff, 'D', `d${i}`).at(dff, 'CLK', `clk${i}`).at(dff, 'RST', `rst${i}`).at(dff, 'Q', `q${i}`).at(dff, 'QN', `qn${i}`);
+    b.at(inv, 'IN1', `q${i}`).at(inv, 'OUT', `y${i}`);
+    b.port(`Y${i}`, 'output', `y${i}`, 1);
+  }
+  return circuitToDocument(b.finish({ erc: false })) as unknown as Record<string, unknown>;
+}
+
+test('the miner extracts a chip over HTTP, and the same request can replace with it', async () => {
+  const document = repeatedOddAddersDocument(4);
+
+  const extracted = await post('/api/mine', { document, extract: true });
+  assertEqual(extracted.status, 200, 'extraction answers');
+  const ex = (extracted.json().extraction ?? {}) as Record<string, unknown>;
+  assert(typeof ex.chipId === 'string' && (ex.chipId as string).length > 0, `a chip id came back (${String(ex.chipId)})`);
+  assertEqual(ex.identical, true, 'the copy was measured against the pattern');
+  assertEqual(ex.differingRows, 0, 'differing rows');
+  assertEqual((ex.ports as unknown[]).length, 5, 'three input ports and two output ports');
+  assert(ex.implementation !== null && typeof ex.implementation === 'object', 'with the implementation as a document');
+  assertEqual(((ex.implementation as Record<string, unknown>).components as unknown[]).length, 4, 'holding the four copied components');
+  assert(ex.chip !== null && typeof ex.chip === 'object', 'and a ChipDocument the client can persist or add to its project');
+  assertEqual((ex.chip as Record<string, unknown>).id, ex.chipId, 'with the extracted id');
+  assert((ex.chip as Record<string, unknown>).circuit !== undefined, 'with its implementation ready to serialize');
+  assertEqual(extracted.json().replacement, undefined, 'nothing is replaced unless that is asked for');
+
+  // The API is stateless: send the returned ChipDocument back as library data and it
+  // must be deserialized into a runtime Chip (with its implementation and component
+  // spec), not stuffed into ChipLibrary as a plain JSON object.
+  const imported = await post('/api/mine', {
+    document,
+    chips: [ex.chip],
+    pattern: ex.patternId,
+    chip: ex.chipId,
+    replace: true,
+  });
+  assertEqual(imported.status, 200, `the returned ChipDocument can be sent back (${imported.text.slice(0, 220)})`);
+  const importedReplacement = (imported.json().replacement ?? {}) as Record<string, unknown>;
+  assertEqual(importedReplacement.chipId, ex.chipId, 'the imported chip was used');
+  assertEqual(importedReplacement.replaced, 4, 'all repetitions replaced from the reloaded ChipDocument');
+  assertEqual(importedReplacement.componentsAfter, 4, 'the sheet now contains four chip instances');
+
+  // Extraction registers the chip in the libraries built for *this* request, so
+  // extracting and replacing happen in one request: the next one starts clean.
+  const both = await post('/api/mine', { document, extract: true, replace: true });
+  assertEqual(both.status, 200, 'extraction and replacement in one request');
+  const sub = (both.json().replacement ?? {}) as Record<string, unknown>;
+  const chipId = ((both.json().extraction ?? {}) as Record<string, unknown>).chipId;
+  assertEqual(sub.chipId, chipId, 'the replacement used the chip that was just extracted');
+  assertEqual(sub.replaced, 4, 'all four occurrences');
+  assertEqual(sub.componentsBefore, 16, 'sixteen gates in');
+  assertEqual(sub.componentsAfter, 4, 'four chip instances out');
+  assertEqual((sub.skipped as unknown[]).length, 0, 'none skipped');
+
+  const refused = await post('/api/mine', { document, extract: true, measure: false, matchChips: false });
+  assertEqual(refused.status, 409, 'an unmeasured block cannot be extracted into a chip');
+  assert(/not measured/i.test(refused.text), `and the refusal says why: ${refused.text.slice(0, 180)}`);
+
+  const sequential = await post('/api/mine', { document: repeatedSequentialDocument(), extract: true });
+  assertEqual(sequential.status, 409, 'a static DFF snapshot cannot be extracted as an equivalent state machine');
+  assert(/not measured/i.test(sequential.text), `the server explains that the sequential pattern was not measured: ${sequential.text.slice(0, 220)}`);
 });
 
 test('the editor and the engine modules are served as executable JavaScript', async () => {

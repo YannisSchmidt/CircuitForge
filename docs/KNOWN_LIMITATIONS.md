@@ -114,11 +114,28 @@ models and the implementation, and the engine reports them rather than papering 
   cone and its carry cone both read `a`, `b` and `ci`. Two outputs whose cones read different
   nets stay two findings, so a block like "correct sum, carry taken from a two-input AND" is
   reported as its parts rather than as one wrong adder.
-- **Behaviour is measured exhaustively only up to five inputs.** Beyond that the truth table is
-  sampled, is labelled as not exhaustive, and a match against a chip is correspondingly weaker.
-- **Occurrences inside a chip expansion are reported but not replaceable.** They belong to
-  another sheet; editing them from here would change every instance of that chip. The count of
-  replaceable occurrences is reported separately from the count of occurrences.
+- **Behaviour is measured exhaustively only up to five inputs.** A wider cone is marked *not
+  measured*; the current engine does not sample the table and does not call it a match.
+  Extraction refuses both an unmeasured pattern and any partial table: a new chip is registered
+  only after its full measured table agrees with the pattern.
+- **Sequential logic is not behaviourally measured by the miner yet.** A level-0 `settle()` shows
+  a DFF or latch's current state but does not exercise clock edges or latch transparency. Such
+  patterns remain visible structurally, but are marked *not measured*: no library match,
+  extraction, or replacement is offered from that snapshot. A future clocked state-space or
+  temporal-equivalence procedure is needed before those operations are safe.
+- **Occurrences inside a chip expansion are reported but not replaceable or extractable.** They
+  belong to another sheet; editing them from here would change every instance of that chip. The
+  count of replaceable occurrences is reported separately from the count of occurrences.
+- **A mined chip is a fixed implementation, not an inferred abstraction.** Extraction preserves
+  the chosen occurrence's components and promotes its boundary nets to ports. It does not infer
+  which component parameters should become chip parameters or invent metrics. The component-by-
+  component copy must pass ERC and an exhaustive level-0 measurement before registration.
+- **A mining match is a logic-layer equivalence, not an electrical or timing sign-off.** The
+  report's truth table establishes 0/1/X/Z behaviour; it does not prove identical propagation
+  delay, power, transistor-level response or thermal behaviour of a replacement chip. The miner
+  includes declared digital timing and state semantics in its structural grouping, but the chip
+  comparison itself measures level 0 only. Re-run timing/electrical/thermal analysis after
+  replacement when those quantities matter.
 
 ## Rendering
 

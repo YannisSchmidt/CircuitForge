@@ -116,7 +116,15 @@ chips via `extract_pattern_as_chip`.
 > would wire to), the measured truth table, the matched chip and the number of rows that
 > differ, and what replacing it would save. `replacePatternWithChip` substitutes the
 > occurrences that are on the mined sheet and reports every one it skipped, with the
-> reason. The 184-occurrence example this section asks for is a test:
+> reason. `extractPatternAsChip` copies one on-sheet occurrence into a new chip,
+> promotes the boundary nets to ordered ports, checks ERC, and re-measures the copy;
+> it registers the chip in both libraries **only after all truth-table rows agree**.
+> The editor offers “Save as new chip”; the CLI can persist the result and source sheet
+> as one `.cfproj`, and the HTTP API returns a portable `ChipDocument` (the API request
+> itself remains stateless). Extraction is exhaustive only through five binary inputs;
+> it refuses an unmeasured or partial table. The chip is a fixed implementation — it
+> does not infer a parameter schema or invent metrics. The 184-occurrence example this
+> section asks for is a test:
 > `tests/mining/mining.test.ts` builds the sheet, finds all 184, matches them to
 > `full_adder` by measured behaviour, replaces all 184, and checks that no output
 > changed.

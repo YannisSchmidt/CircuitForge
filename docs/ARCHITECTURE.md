@@ -169,7 +169,9 @@ violations (against declared ratings).
 
 Pattern mining (`src/engine/mining/`): fan-in cones are grown over the flattened logic
 graph at several external-input budgets, and two cones are treated as the same shape when
-their **cone-local** Weisfeiler–Lehman labels agree — local, because a global refinement
+their **cone-local** Weisfeiler–Lehman labels agree. A label includes the logic function, the
+state-element edge/reset/initial-state configuration and declared delay fields, not just a generic
+“gate” or “register” tag. Refinement is local, because a global refinement
 encodes the neighbourhood beyond the cone, and in a ripple chain no two stages have the
 same neighbourhood. Cones that read the same external nets are merged, so a sum cone and a
 carry cone become one full adder rather than two half findings, and each merged block's
@@ -178,7 +180,11 @@ test, **not** a proof of isomorphism, and the report says so: what confirms a ma
 behaviour, measured at level 0 and compared row by row with the chip library. Only an
 identical match is offered for replacement, only for occurrences that live on the mined
 sheet, and blocks contained in a larger reported block are labelled as such so that nobody
-de-duplicates the same gates twice.
+de-duplicates the same gates twice. When no library chip computes a block, `extractPatternAsChip`
+copies one on-sheet occurrence, promotes the boundary nets to ordered ports, and exhaustively
+re-measures the copied implementation. It registers in the component and chip libraries only if
+the full truth table agrees and ERC has no errors; the resulting fixed implementation can be
+saved, instantiated and flattened like a hand-authored chip.
 
 ## 6. Synthesis & optimization
 

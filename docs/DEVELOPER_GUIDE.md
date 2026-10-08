@@ -114,7 +114,7 @@ the body returns `{ what, sizeUnit, run, units?, rateUnit?, metrics?, notes?, af
 ## Testing checklist for a change
 
 1. `npm run build` clean — never hide `tsc` output.
-2. `npm test` green (368 tests).
+2. `npm test` green (380 tests).
 3. If the change touches a solver, a model or a report: add a test that asserts a
    hand-derived number, not a snapshot of whatever the code produced.
 4. If it touches performance: `circuitforge benchmark --suite scaling --size 1000

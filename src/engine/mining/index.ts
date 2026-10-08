@@ -43,14 +43,17 @@
  *      measured truth table is identical to the `full_adder` chip's, and replacing all
  *      184 takes the sheet from 920 components to 184 with no ERC error and no change
  *      to the behaviour of any output.
- *   5. Every candidate is measured: its external inputs are driven through all
- *      combinations the level-0 engine can hold in one settle (32 lanes, so up to
- *      five inputs exhaustively) and its outputs sampled. A pattern with more inputs
- *      than that is reported as *not measured*, with the reason, rather than being
- *      matched on structure alone.
- *   6. Matching against the chip library compares measured behaviour, element by
- *      element of the truth table, so a chip is suggested because it computes the same
- *      function — not because its name looked plausible.
+ *   5. Every combinational candidate is measured: its external inputs are driven
+ *      through all combinations the level-0 engine can hold in one settle (32 lanes,
+ *      so up to five inputs exhaustively) and its outputs sampled. A wider pattern is
+ *      reported as *not measured*, rather than being matched on structure alone.
+ *      DFF/latch patterns are also *not measured*: one settle does not exercise a clock
+ *      edge, and a snapshot of the power-on state is not evidence of equivalent state
+ *      machines.
+ *   6. Matching against the chip library compares measured combinational behaviour,
+ *      element by element of the truth table, so a chip is suggested because it
+ *      computes the same function — not because its name looked plausible. Sequential
+ *      chips are not matched until a clocked equivalence procedure exists.
  *
  * What it does not do: it does not find patterns that have no distinguished output
  * element, it does not look deeper than `depth`, it does not consider analogue
@@ -59,10 +62,12 @@
  * also say where it looked.
  */
 
-import { ChipLibrary, type Chip } from '../core/chip.js';
+import { ChipLibrary, makeChip, sanitizeChipId, type Chip } from '../core/chip.js';
 import { Circuit, type ComponentInstance } from '../core/circuit.js';
 import type { Library } from '../core/library.js';
-import type { Diagnostic } from '../core/labels.js';
+import { error, info, warn, type Diagnostic } from '../core/labels.js';
+import { CircuitBuilder } from '../core/build.js';
+import { registerChip } from '../core/registry.js';
 import { buildLogicGraph, LogicVectorSim, LOGIC_FN, type LogicElement, type LogicGraph } from '../analysis/logic.js';
 import { flatten } from '../sim/netlist.js';
 
@@ -227,6 +232,29 @@ function fnName(element: LogicElement): string {
   return element.kind.toUpperCase();
 }
 
+/** Level-0 and declared-timing attributes that must agree before two cones are one pattern. */
+function isSequential(element: LogicElement): boolean {
+  return element.kind === 'dff' || element.kind === 'latch';
+}
+
+function logicSignature(element: LogicElement): string {
+  return [
+    element.kind,
+    `fn=${element.fn}`,
+    `io=${element.inputs.length}/${element.outputs.length}`,
+    `sel=${element.selects.length}`,
+    `channels=${element.channels}`,
+    `decoder=${Number(element.decoder)}`,
+    `activeLow=${Number(element.activeLow)}`,
+    `resetLow=${Number(element.rstLow)}`,
+    `falling=${Number(element.falling)}`,
+    `initial=${element.initial}`,
+    `setup=${element.setup}`,
+    `tphl=${element.tphl}`,
+    `tplh=${element.tplh}`,
+  ].join(':');
+}
+
 function hash(text: string): string {
   let h = 2166136261;
   for (let i = 0; i < text.length; i++) {
@@ -292,7 +320,7 @@ export function adjacency(graph: LogicGraph): Adjacency {
  * only if their neighbourhoods to that distance look the same.
  */
 export function refineColours(graph: LogicGraph, adj: Adjacency, rounds: number): string[] {
-  let colours = graph.elements.map((e) => `${e.kind}:${e.kind === 'gate' ? e.fn : `${e.inputs.length}/${e.outputs.length}`}:${e.inputs.length}`);
+  let colours = graph.elements.map(logicSignature);
   for (let round = 0; round < rounds; round++) {
     const next: string[] = new Array(colours.length);
     for (const element of graph.elements) {
@@ -484,7 +512,7 @@ export function canonicalCone(graph: LogicGraph, adj: Adjacency, cone: number[])
   let label = new Map<number, string>();
   for (const index of cone) {
     const element = graph.elements[index];
-    label.set(index, `${element.kind}:${element.kind === 'gate' ? element.fn : `${element.inputs.length}/${element.outputs.length}`}`);
+    label.set(index, logicSignature(element));
   }
   for (let round = 0; round < 3; round++) {
     const next = new Map<number, string>();
@@ -595,13 +623,19 @@ export function mineSubcircuits(circuit: Circuit, lib: Library, chips?: ChipLibr
   const minOccurrences = Math.max(1, Math.round(options.minOccurrences ?? 2));
   const maxPatterns = Math.max(1, Math.round(options.maxPatterns ?? 24));
   const measure = options.measure !== false;
-  const matchChips = options.matchChips !== false;
-  const maxInputs = Math.max(1, Math.round(options.maxMeasuredInputs ?? 5));
+  const requestedMatchChips = options.matchChips !== false;
+  const matchChips = measure && requestedMatchChips;
+  const notes: string[] = [];
+  if (!measure && requestedMatchChips) notes.push('chip matching was skipped because measurement is disabled: a match is measured behaviour, not a structural guess.');
+  const requestedMaxInputs = Number.isFinite(options.maxMeasuredInputs) ? Math.round(options.maxMeasuredInputs!) : 5;
+  // The L0 engine settles 32 truth-table lanes at once. More than five input bits
+  // cannot be called exhaustive by this bit-parallel measurement routine.
+  const maxInputs = Math.min(5, Math.max(1, requestedMaxInputs));
+  if (requestedMaxInputs > 5) notes.push(`maxMeasuredInputs ${requestedMaxInputs} was capped at 5: the L0 truth-table engine settles 32 input combinations at once; larger blocks are reported NOT MEASURED rather than sampled and called exhaustive.`);
   const maxPatternInputs = Math.max(1, Math.round(options.maxPatternInputs ?? 5));
   const maxPatternSize = Math.max(2, Math.round(options.maxPatternSize ?? 12));
   const coneSlack = Math.max(0, Math.round(options.coneSlack ?? 1));
   const mergeOutputs = options.mergeOutputs !== false;
-  const notes: string[] = [];
 
   // Expansion is deliberately off, and there is no option to turn it on: mining reads
   // the logic graph, and a gate expanded into its CMOS network contributes transistors
@@ -615,7 +649,6 @@ export function mineSubcircuits(circuit: Circuit, lib: Library, chips?: ChipLibr
   });
   const graph = buildLogicGraph(netlist);
   const adj = adjacency(graph);
-  const colours = refineColours(graph, adj, depth);
 
   if (graph.elements.length === 0) {
     notes.push(
@@ -639,6 +672,7 @@ export function mineSubcircuits(circuit: Circuit, lib: Library, chips?: ChipLibr
   const claimed = new Set<number>();
   let conesExamined = 0;
   const distinctForms = new Set<string>();
+  let notedSequentialMeasurement = false;
 
   const emit = (
     id: string,
@@ -650,7 +684,24 @@ export function mineSubcircuits(circuit: Circuit, lib: Library, chips?: ChipLibr
     occurrences: PatternOccurrence[],
     mergedFrom: string[],
   ): void => {
-    const behaviour = sim ? measureBehaviour(sim, graph, externalInputs, outputs, maxInputs) : null;
+    const sequentialCount = elements.reduce((count, index) => count + (isSequential(graph.elements[index]) ? 1 : 0), 0);
+    const behaviour = !sim
+      ? null
+      : sequentialCount > 0
+        ? {
+            inputs: externalInputs.length,
+            outputs: outputs.length,
+            rows: [],
+            complete: false,
+            lanes: 0,
+            measured: false,
+            reason: `${sequentialCount} DFF/latch element(s) require clock transitions; a level-0 settle alone only samples the current state, so their behaviour is not measured.`,
+          }
+        : measureBehaviour(sim, graph, externalInputs, outputs, maxInputs);
+    if (sequentialCount > 0 && !notedSequentialMeasurement) {
+      notedSequentialMeasurement = true;
+      notes.push('sequential patterns are reported structurally but not measured, matched, extracted or replaced: the current level-0 miner does not exercise clock transitions.');
+    }
     const matched = matchChips && behaviour && behaviour.measured ? matchAgainstChips(chips, lib, behaviour, notes) : null;
     const onSheet = occurrences.filter((o) => o.onSheet);
     patterns.push({
@@ -974,57 +1025,63 @@ function permuteRows(rows: string[], inputs: number, inputPermutation: number[],
 function matchAgainstChips(chips: ChipLibrary | undefined, lib: Library, behaviour: PatternBehaviour, notes: string[]): MatchedChip | null {
   if (!chips || chips.size() === 0) return null;
   let best: MatchedChip | null = null;
-  const inputPerms = behaviour.inputs <= 5 ? permutations(behaviour.inputs) : [[...Array(behaviour.inputs).keys()]];
-  const outputPerms = behaviour.outputs <= 4 ? permutations(behaviour.outputs) : [[...Array(behaviour.outputs).keys()]];
   for (const chip of chips.all()) {
-    const candidate = chipBehaviour(chip, lib, chips, behaviour.inputs, behaviour.outputs);
-    if (!candidate || candidate.rows.length !== behaviour.rows.length) continue;
-    let identical = false;
-    let chosenIn: number[] | undefined;
-    let chosenOut: number[] | undefined;
-    let bestDiffering = candidate.rows.length;
-    outer: for (const inPerm of inputPerms) {
-      for (const outPerm of outputPerms) {
-        const permuted = inPerm.every((v, i) => v === i) && outPerm.every((v, i) => v === i) ? behaviour.rows : permuteRows(behaviour.rows, behaviour.inputs, inPerm, outPerm);
-        let differing = 0;
-        for (let i = 0; i < permuted.length; i++) if (permuted[i] !== candidate.rows[i]) differing++;
-        if (differing === 0) {
-          identical = true;
-          chosenIn = inPerm;
-          chosenOut = outPerm;
-          bestDiffering = 0;
-          break outer;
-        }
-        if (differing < bestDiffering) {
-          bestDiffering = differing;
-          chosenIn = inPerm;
-          chosenOut = outPerm;
-        }
-      }
-    }
-    const permutedLabel =
-      identical && chosenIn && chosenOut && !(chosenIn.every((v, i) => v === i) && chosenOut.every((v, i) => v === i))
-        ? `, with inputs matched in the order [${chosenIn.join(',')}] and outputs as [${chosenOut.join(',')}]`
-        : '';
-    const entry: MatchedChip = {
-      id: chip.def.id,
-      name: chip.def.name,
-      version: chip.def.version,
-      identical,
-      differingRows: bestDiffering,
-      inputPermutation: chosenIn,
-      outputPermutation: chosenOut,
-      note: identical
-        ? `measured truth tables are identical over all ${behaviour.rows.length} input combination(s)${permutedLabel}`
-        : `${bestDiffering} of ${behaviour.rows.length} row(s) differ at the closest port ordering`,
-    };
-    if (identical) return entry;
+    const entry = matchOneChip(chip, lib, chips, behaviour);
+    if (!entry) continue;
+    if (entry.identical) return entry;
     if (!best || entry.differingRows! < best.differingRows!) best = entry;
   }
   if (best && !best.identical) {
     notes.push(`the closest chip to a pattern was ${best.name} with ${best.differingRows} differing row(s); it is reported as a near match, not as a suggestion to substitute.`);
   }
   return best;
+}
+
+/** Compare one specific chip with a measured pattern, including port permutations. */
+function matchOneChip(chip: Chip, lib: Library, chips: ChipLibrary, behaviour: PatternBehaviour): MatchedChip | null {
+  const candidate = chipBehaviour(chip, lib, chips, behaviour.inputs, behaviour.outputs);
+  if (!candidate?.measured || !candidate.complete || candidate.rows.length !== behaviour.rows.length) return null;
+  const inputPerms = behaviour.inputs <= 5 ? permutations(behaviour.inputs) : [[...Array(behaviour.inputs).keys()]];
+  const outputPerms = behaviour.outputs <= 4 ? permutations(behaviour.outputs) : [[...Array(behaviour.outputs).keys()]];
+  let identical = false;
+  let chosenIn: number[] | undefined;
+  let chosenOut: number[] | undefined;
+  let bestDiffering = candidate.rows.length;
+  outer: for (const inPerm of inputPerms) {
+    for (const outPerm of outputPerms) {
+      const permuted = inPerm.every((v, i) => v === i) && outPerm.every((v, i) => v === i) ? behaviour.rows : permuteRows(behaviour.rows, behaviour.inputs, inPerm, outPerm);
+      let differing = 0;
+      for (let i = 0; i < permuted.length; i++) if (permuted[i] !== candidate.rows[i]) differing++;
+      if (differing === 0) {
+        identical = true;
+        chosenIn = inPerm;
+        chosenOut = outPerm;
+        bestDiffering = 0;
+        break outer;
+      }
+      if (differing < bestDiffering) {
+        bestDiffering = differing;
+        chosenIn = inPerm;
+        chosenOut = outPerm;
+      }
+    }
+  }
+  const permutedLabel =
+    identical && chosenIn && chosenOut && !(chosenIn.every((v, i) => v === i) && chosenOut.every((v, i) => v === i))
+      ? `, with inputs matched in the order [${chosenIn.join(',')}] and outputs as [${chosenOut.join(',')}]`
+      : '';
+  return {
+    id: chip.def.id,
+    name: chip.def.name,
+    version: chip.def.version,
+    identical,
+    differingRows: bestDiffering,
+    inputPermutation: chosenIn,
+    outputPermutation: chosenOut,
+    note: identical
+      ? `measured truth tables are identical over all ${behaviour.rows.length} input combination(s)${permutedLabel}`
+      : `${bestDiffering} of ${behaviour.rows.length} row(s) differ at the closest port ordering`,
+  };
 }
 
 const chipBehaviourCache = new Map<string, PatternBehaviour | null>();
@@ -1035,18 +1092,26 @@ function chipBehaviour(chip: Chip, lib: Library, chips: ChipLibrary, inputs: num
   const chipInputs = ports.filter((p) => p.direction === 'input' && (p.width ?? 1) === 1);
   const chipOutputs = ports.filter((p) => p.direction === 'output' && (p.width ?? 1) === 1);
   if (chipInputs.length !== inputs || chipOutputs.length !== outputs) return null;
-  const cacheKey = `${chip.def.id}@${chip.def.version}:${inputs}x${outputs}`;
+  const cacheKey = `${chip.def.id}@${chip.def.version}:${chip.fingerprint(chip.defaultParams())}:${inputs}x${outputs}`;
   if (chipBehaviourCache.has(cacheKey)) return chipBehaviourCache.get(cacheKey) ?? null;
   let behaviour: PatternBehaviour | null = null;
   try {
     const implementation = chip.implementation(chip.defaultParams());
     const netlist = flatten(implementation, lib, chips, { metadata: true });
     const graph = buildLogicGraph(netlist);
-    const sim = new LogicVectorSim(graph, { loopIterations: 8 });
-    const inputNets = graph.inputs.slice(0, inputs);
-    const outputNets = graph.outputs.slice(0, outputs);
-    if (inputNets.length === inputs && outputNets.length === outputs) {
-      behaviour = measureBehaviour(sim, graph, inputNets, outputNets, Math.max(inputs, 5));
+    // A single settle does not exercise a DFF edge or latch transparency. Returning
+    // a static snapshot here could match a different state machine with the same
+    // power-on value, so sequential chips are deliberately ineligible for a mined
+    // behaviour match until the miner has a clocked equivalence procedure.
+    if (graph.elements.some(isSequential)) {
+      behaviour = null;
+    } else {
+      const sim = new LogicVectorSim(graph, { loopIterations: 8 });
+      const inputNets = graph.inputs.slice(0, inputs);
+      const outputNets = graph.outputs.slice(0, outputs);
+      if (inputNets.length === inputs && outputNets.length === outputs) {
+        behaviour = measureBehaviour(sim, graph, inputNets, outputNets, Math.max(inputs, 5));
+      }
     }
   } catch {
     behaviour = null;
@@ -1083,7 +1148,11 @@ function suggestChip(id: string, kinds: string[], inputs: number, outputs: numbe
 // ---------------------------------------------------------------------------
 
 export interface ReplaceOptions {
-  /** Chip to instantiate. Defaults to the chip the pattern matched, if it matched one. */
+  /**
+   * Chip to instantiate. Defaults to the chip the pattern matched, if it matched one.
+   * Whichever id is selected, the chip is measured against the pattern before any edit;
+   * an explicit override cannot bypass the identity check.
+   */
   chipId?: string;
   /** Replace at most this many occurrences. */
   limit?: number;
@@ -1145,6 +1214,41 @@ export function replacePatternWithChip(circuit: Circuit, lib: Library, chips: Ch
       notes,
     );
   }
+  const patternBehaviour = pattern.behaviour;
+  if (!patternBehaviour?.measured || !patternBehaviour.complete) {
+    return refuse(
+      circuit,
+      chipId,
+      before,
+      pattern,
+      'the pattern has no exhaustive measured truth table, so a replacement cannot be verified',
+      notes,
+      'Run mining with measurement enabled and no more than five external inputs. Structural resemblance alone is never enough to substitute a chip.',
+    );
+  }
+  const chipMatch = matchOneChip(chip, lib, chips, patternBehaviour);
+  if (!chipMatch) {
+    return refuse(
+      circuit,
+      chipId,
+      before,
+      pattern,
+      `${chipId} could not be measured against the pattern`,
+      notes,
+      'A replacement is made only after both blocks are exhaustively measured at level 0. Check the chip implementation, its dependencies and the declared port widths.',
+    );
+  }
+  if (!chipMatch.identical) {
+    return refuse(
+      circuit,
+      chipId,
+      before,
+      pattern,
+      `${chipId} differs from the pattern on ${chipMatch.differingRows ?? '?'} of ${patternBehaviour.rows.length} measured row(s)`,
+      notes,
+      'Near matches are reported, never substituted: choose a chip whose measured truth table is identical, or correct the block before replacing it.',
+    );
+  }
 
   const result = circuit.clone();
   result.name = `${circuit.name} (replaced)`;
@@ -1185,8 +1289,8 @@ export function replacePatternWithChip(circuit: Circuit, lib: Library, chips: Ch
     // The matched permutation, when the match needed one: chip port j takes the
     // pattern net the permutation says it corresponds to. Wiring in canonical order
     // instead would build a different circuit that looks like the one measured.
-    const inPerm = pattern.matchedChip?.identical && pattern.matchedChip.inputPermutation ? pattern.matchedChip.inputPermutation : null;
-    const outPerm = pattern.matchedChip?.identical && pattern.matchedChip.outputPermutation ? pattern.matchedChip.outputPermutation : null;
+    const inPerm = chipMatch.inputPermutation;
+    const outPerm = chipMatch.outputPermutation;
     chipInputs.forEach((port, j) => {
       const net = inPerm ? inputNets[inPerm[j]] : inputNets[j];
       if (net) result.connect(instance.id, port.name, net.id);
@@ -1226,7 +1330,15 @@ export function replacePatternWithChip(circuit: Circuit, lib: Library, chips: Ch
   };
 }
 
-function refuse(circuit: Circuit, chipId: string, before: { components: number; nets: number }, pattern: SubcircuitPattern, reason: string, notes: string[]): ReplaceResult {
+function refuse(
+  circuit: Circuit,
+  chipId: string,
+  before: { components: number; nets: number },
+  pattern: SubcircuitPattern,
+  reason: string,
+  notes: string[],
+  hint?: string,
+): ReplaceResult {
   notes.push(`nothing was replaced: ${reason}.`);
   return {
     circuit,
@@ -1237,7 +1349,7 @@ function refuse(circuit: Circuit, chipId: string, before: { components: number; 
     componentsAfter: before.components,
     netsBefore: before.nets,
     netsAfter: before.nets,
-    diagnostics: [],
+    diagnostics: [error('CF8024', reason, hint ? { hint } : undefined)],
     notes,
   };
 }
@@ -1331,6 +1443,299 @@ export function markSubBlocks(patterns: SubcircuitPattern[], testBudget = 2_000_
   return { tests, cutShort };
 }
 
+export interface ExtractOptions {
+  /** Library id for the new chip. Defaults to the pattern's own suggestion. */
+  chipId?: string;
+  /** Display name. Defaults to the suggested name, or the id in capitals. */
+  name?: string;
+  description?: string;
+  /**
+   * Which occurrence becomes the implementation. Defaults to the first one that is on
+   * the mined sheet, because that is the only kind that can be copied from here.
+   */
+  occurrence?: number;
+  /** Widest input space to measure the new chip over (default 5, as in the search). */
+  maxMeasuredInputs?: number;
+}
+
+export interface ExtractResult {
+  chipId: string;
+  /** The registered chip, or null when the extraction was refused. */
+  chip: Chip | null;
+  /** The circuit the chip implements, or null when the extraction was refused. */
+  implementation: Circuit | null;
+  /** What the implementation was measured to compute, in the pattern's port order. */
+  measured: PatternBehaviour | null;
+  /** True when that is row-for-row what the pattern was measured to compute. */
+  identical: boolean;
+  /** Rows that differ, or -1 when the comparison could not be made. */
+  differingRows: number;
+  diagnostics: Diagnostic[];
+  notes: string[];
+}
+
+/**
+ * Turn one occurrence of a mined pattern into a chip of its own, and register it.
+ *
+ * This is the other half of de-duplication. Matching against the library only helps when
+ * somebody already wrote a chip for the block a design repeats; most of the time nobody
+ * has, and the report can only say what a new chip would be called. Extraction builds it:
+ * the components of one occurrence are copied into a new circuit, the nets that crossed
+ * the block's boundary become its ports, and the result is registered in both libraries
+ * so it can be instantiated, expanded, validated and saved like any other chip.
+ *
+ * Two rules keep this honest. The ports are declared in the pattern's canonical order —
+ * the order `replacePatternWithChip` wires in — so extracting and then replacing produces
+ * the circuit that was measured, not a permutation of it. And the new chip is *measured
+ * after it is built*, by the same procedure that measured the pattern: if the rows do not
+ * match, nothing is registered and the result says how many rows differ. A chip is a
+ * promise about behaviour, so it is checked before it is kept, not after.
+ */
+export function extractPatternAsChip(
+  circuit: Circuit,
+  lib: Library,
+  chips: ChipLibrary,
+  pattern: SubcircuitPattern,
+  options: ExtractOptions = {},
+): ExtractResult {
+  const notes: string[] = [];
+  const diagnostics: Diagnostic[] = [];
+  const requestedId = sanitizeChipId(options.chipId ?? pattern.suggestedChip?.id ?? `pattern_${pattern.id}`);
+  const requestedName = options.name?.trim() || pattern.suggestedChip?.name || requestedId.toUpperCase();
+  const requestedMaxInputs = Number.isFinite(options.maxMeasuredInputs) ? Math.round(options.maxMeasuredInputs!) : 5;
+  const maxInputs = Math.min(5, Math.max(1, requestedMaxInputs));
+  if (requestedMaxInputs > 5) notes.push(`maxMeasuredInputs ${requestedMaxInputs} was capped at 5: this L0 truth-table measurement is exhaustive only up to 32 combinations.`);
+
+  const refuse = (message: string, hint?: string): ExtractResult => {
+    diagnostics.push(error('CF8021', message, hint ? { hint } : undefined));
+    notes.push(`nothing was extracted: ${message}`);
+    return {
+      chipId: requestedId,
+      chip: null,
+      implementation: null,
+      measured: null,
+      identical: false,
+      differingRows: -1,
+      diagnostics,
+      notes,
+    };
+  };
+
+  const expected = pattern.behaviour;
+  if (!expected || !expected.measured) {
+    return refuse(
+      'this pattern was not measured, so an extracted chip could not be checked against it',
+      'Run the search with measurement on (the default). An extraction is registered only once its implementation has been measured to compute what the pattern was measured to compute.',
+    );
+  }
+  if (!expected.complete) {
+    return refuse(
+      'the pattern has only a partial measurement, which is not enough to verify a new chip',
+      'An extracted chip is registered only when the full truth table is measured. Reduce its number of inputs, or extend the measurement engine before asking for a sampled extraction.',
+    );
+  }
+
+  const defaultOccurrence = options.occurrence === undefined;
+  const index = defaultOccurrence
+    ? pattern.occurrences.findIndex((o) => o.onSheet)
+    : Number.isFinite(options.occurrence)
+      ? Math.floor(options.occurrence!)
+      : -1;
+  if (!defaultOccurrence && (index < 0 || index >= pattern.occurrences.length)) {
+    return refuse(
+      `occurrence index ${String(options.occurrence)} is outside this pattern's ${pattern.occurrences.length} occurrence(s)`,
+      'Use a zero-based index printed in the report, or omit occurrence to take the first one on this sheet.',
+    );
+  }
+  if (defaultOccurrence && index < 0) {
+    return refuse(
+      pattern.occurrences.length > 0
+        ? `every occurrence of this pattern lives inside a chip expansion (${pattern.occurrences[0]?.paths[0] ?? '?'}), not on this sheet`
+        : 'this pattern has no occurrences',
+      'Open the sheet that holds those components and extract from there: a chip is built from components, not from the insides of another chip.',
+    );
+  }
+  const occurrence = pattern.occurrences[index];
+  if (!occurrence) return refuse(`this pattern has no occurrence #${index}`);
+  if (!occurrence.onSheet) {
+    return refuse(
+      `occurrence #${index} lives inside a chip expansion (${occurrence.paths[0] ?? '?'}), not on this sheet`,
+      'Open the sheet that holds those components and extract from there: a chip is built from components, not from the insides of another chip.',
+    );
+  }
+
+  const byRef = new Map<string, ComponentInstance>();
+  for (const component of circuit.allComponents()) byRef.set(component.ref, component);
+  const victims = occurrence.refs.map((ref) => byRef.get(ref));
+  const missing = occurrence.refs.filter((_, i) => victims[i] === undefined);
+  if (missing.length > 0) {
+    return refuse(`the component(s) ${missing.join(', ')} are not on this sheet`, 'The sheet changed since the search was run; search again.');
+  }
+
+  // ---- the implementation ---------------------------------------------------
+  //
+  // Net names are carried over as they are: the nets that crossed the boundary become
+  // ports bound to a net of the same name, and the nets that stayed inside stay inside.
+  // Keeping the names is what makes the extracted chip readable next to the sheet it
+  // came from, and what makes the port order below the pattern's own order.
+  const builder = new CircuitBuilder(lib, requestedName, chips);
+  const usedPortNames = new Set<string>();
+  const portNameFor = (netName: string, fallback: string): string => {
+    const base = netName.replace(/[^A-Za-z0-9_]/g, '_').replace(/^_+|_+$/g, '').toUpperCase() || fallback;
+    let candidate = base;
+    let n = 2;
+    while (usedPortNames.has(candidate)) candidate = `${base}_${n++}`;
+    usedPortNames.add(candidate);
+    return candidate;
+  };
+  const inputPorts = occurrence.externalInputNames.map((netName, i) => {
+    const net = findNet(circuit, netName);
+    const portName = portNameFor(netName, `I${i}`);
+    builder.port(portName, 'input', netName, net?.width ?? 1);
+    return portName;
+  });
+  const outputPorts = occurrence.outputNames.map((netName, i) => {
+    const net = findNet(circuit, netName);
+    const portName = portNameFor(netName, `O${i}`);
+    builder.port(portName, 'output', netName, net?.width ?? 1);
+    return portName;
+  });
+
+  for (let i = 0; i < occurrence.refs.length; i++) {
+    const source = victims[i] as ComponentInstance;
+    const spec = lib.get(source.specId);
+    if (!spec) {
+      return refuse(`${source.ref} is a "${source.specId}", which the component library does not know`, 'The library that mined this circuit is not the one the component was placed from.');
+    }
+    const instance = builder.add(
+      source.specId,
+      { ...(source.params ?? {}) },
+      { x: source.x, y: source.y },
+      { bits: source.bits, rotation: (source.rotation ?? 0) as 0 | 90 | 180 | 270, chipRef: source.chipRef },
+    );
+    for (const pin of spec.pins) {
+      const net = circuit.netOf(source.id, pin.name);
+      if (net) builder.at(instance, pin.name, net.name, net.width);
+    }
+  }
+  const implementation = builder.finish({ erc: false });
+
+  const erc = implementation.erc(lib, chips);
+  for (const d of erc) diagnostics.push(d);
+  const ercErrors = erc.filter((d) => d.severity === 'error');
+  if (ercErrors.length > 0) {
+    return refuse(
+      `the extracted sheet has ${ercErrors.length} ERC error(s), the first being ${ercErrors[0].code}: ${ercErrors[0].message}`,
+      'A chip is a promise other sheets will rely on, so one that does not pass its own electrical rules check is not registered. Fix the source block, or extract a different occurrence.',
+    );
+  }
+
+  // ---- measure what was just built, the way the pattern was measured --------
+  const netlist = flatten(implementation, lib, chips, { expandGates: false, metadata: true });
+  const graph = buildLogicGraph(netlist);
+  const sequentialCount = graph.elements.filter(isSequential).length;
+  if (sequentialCount > 0) {
+    return refuse(
+      `the extracted implementation contains ${sequentialCount} sequential element(s), whose behaviour cannot be proven by a single level-0 settle`,
+      'Nothing was registered. A verified sequential chip needs clocked state-space or temporal equivalence testing; this miner currently verifies combinational truth tables only.',
+    );
+  }
+  const nodeByName = (candidates: number[]): Map<string, number> => {
+    const map = new Map<string, number>();
+    for (const node of candidates) map.set(graph.netName(node), node);
+    return map;
+  };
+  const inputsByName = nodeByName(graph.inputs);
+  const outputsByName = nodeByName(graph.outputs);
+  const inNodes = occurrence.externalInputNames.map((n) => inputsByName.get(n) ?? -1);
+  const outNodes = occurrence.outputNames.map((n) => outputsByName.get(n) ?? -1);
+  if (inNodes.some((n) => n < 0) || outNodes.some((n) => n < 0)) {
+    return refuse(
+      'the extracted chip does not expose every net the pattern reads and drives as a port of its own',
+      'This usually means a net name is shared with something else on the sheet; extract a different occurrence or rename the net.',
+    );
+  }
+  const sim = new LogicVectorSim(graph, { loopIterations: 8 });
+  const measured = measureBehaviour(sim, graph, inNodes, outNodes, maxInputs);
+  if (!measured.measured) {
+    return refuse(`the extracted chip could not be simulated: ${measured.reason ?? 'unknown reason'}`);
+  }
+  if (!measured.complete) {
+    return refuse(
+      'the extracted chip was not exhaustively measured, so it cannot be verified against the pattern',
+      'Nothing was registered. Exhaustive verification is the gate that separates an extracted component block from an asserted chip behaviour.',
+    );
+  }
+  let differingRows = 0;
+  const rows = Math.min(expected.rows.length, measured.rows.length);
+  for (let k = 0; k < rows; k++) if (expected.rows[k] !== measured.rows[k]) differingRows++;
+  if (expected.rows.length !== measured.rows.length) differingRows += Math.abs(expected.rows.length - measured.rows.length);
+  if (differingRows > 0) {
+    return refuse(
+      `the extracted implementation differs from the pattern on ${differingRows} of ${Math.max(expected.rows.length, measured.rows.length)} measured row(s)`,
+      'Nothing was registered. This should not happen — the block was copied component for component — so treat it as a bug report: the pattern, the occurrence and both truth tables are in the result.',
+    );
+  }
+
+  // ---- register -------------------------------------------------------------
+  const identity = freeChipIdentity(lib, chips, requestedId, requestedName, notes);
+  const chipId = identity.id;
+  const description =
+    options.description ??
+    `Extracted from "${circuit.name}": ${pattern.description}, ${pattern.size} element(s), ${occurrence.refs.length} component(s). Measured identical to the block it was cut from over ${measured.rows.length} input combination(s), exhaustively.`;
+  const chip = makeChip({
+    id: chipId,
+    name: identity.name,
+    description,
+    circuit: implementation,
+    tags: ['mined', 'extracted'],
+    notes: `pattern ${pattern.id}, occurrence #${index}, source circuit "${circuit.name}".`,
+  });
+  registerChip(lib, chips, chip);
+
+  notes.push(`extracted ${occurrence.refs.length} component(s) into chip "${chipId}" v${chip.def.version} with ${chip.def.ports.length} port(s): ${inputPorts.join(', ')} in, ${outputPorts.join(', ')} out.`);
+  notes.push(
+    `the implementation was re-measured after the copy and reproduces the pattern over ${measured.rows.length} combination(s)${measured.complete ? ' exhaustively' : ' (sampled: more inputs than the measurement budget)'}.`,
+  );
+  const others = pattern.saving.replaceable - 1;
+  if (others > 0) notes.push(`${others} other occurrence(s) are on this sheet and can now be replaced with it.`);
+  if (erc.length > 0) diagnostics.push(info('CF8022', `the extracted chip carries ${erc.length} ERC note(s), none of them an error`));
+  if (pattern.count > pattern.saving.replaceable) {
+    diagnostics.push(
+      warn('CF8023', `${pattern.count - pattern.saving.replaceable} occurrence(s) of this pattern live inside chip expansions and were not candidates for extraction from this sheet`),
+    );
+  }
+
+  return { chipId, chip, implementation, measured, identical: true, differingRows: 0, diagnostics, notes };
+}
+
+/** Choose a free id and display name; never overwrite a component or a chip by accident. */
+function freeChipIdentity(
+  lib: Library,
+  chips: ChipLibrary,
+  wantedId: string,
+  wantedName: string,
+  notes: string[],
+): { id: string; name: string } {
+  let id = wantedId;
+  if (chips.has(id) || lib.has(id)) {
+    let n = 2;
+    while (chips.has(`${wantedId}_${n}`) || lib.has(`${wantedId}_${n}`)) n++;
+    id = `${wantedId}_${n}`;
+    notes.push(`"${wantedId}" is already used by a component or chip, so the extracted chip id is "${id}".`);
+  }
+
+  const baseName = wantedName.trim() || id.toUpperCase();
+  let name = baseName;
+  if (chips.has(name)) {
+    let n = 2;
+    while (chips.has(`${baseName} (${n})`)) n++;
+    name = `${baseName} (${n})`;
+    notes.push(`the display name "${baseName}" is already used by a chip, so the extracted chip is named "${name}".`);
+  }
+  return { id, name };
+}
+
 export function miningToText(report: MiningReport): string {
   const lines: string[] = [];
   lines.push(`Repeated subcircuits in ${report.circuit} (fingerprint ${report.fingerprint})`);
@@ -1389,7 +1794,6 @@ export function inspectCones(circuit: Circuit, lib: Library, chips?: ChipLibrary
   const netlist = flatten(circuit, lib, chips ?? new ChipLibrary(), { metadata: true });
   const graph = buildLogicGraph(netlist);
   const adj = adjacency(graph);
-  const colours = refineColours(graph, adj, depth);
   const nameOf = (elementIndex: number): string => {
     const element = graph.elements[elementIndex];
     const instance = adj.instanceOfElement[element.element];

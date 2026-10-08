@@ -13,14 +13,18 @@
  * match is never substituted.
  */
 
-import { assert, assertEqual, suite, test } from '../framework.js';
+import { assert, assertEqual, assertThrows, suite, test } from '../framework.js';
 import { CircuitBuilder } from '../../src/engine/core/build.js';
 import type { Library } from '../../src/engine/core/library.js';
 import type { Circuit } from '../../src/engine/core/circuit.js';
 import { buildReferenceProject } from '../../src/engine/synthesis/reference.js';
+import { ChipLibrary, makeChip } from '../../src/engine/core/chip.js';
+import { registerChip } from '../../src/engine/core/registry.js';
+import { createDefaultLibrary } from '../../src/engine/core/registry.js';
+import { loadProjectText, saveProjectText } from '../../src/engine/io/project-file.js';
 import { flatten } from '../../src/engine/sim/netlist.js';
 import { buildLogicGraph, LogicVectorSim } from '../../src/engine/analysis/logic.js';
-import { mineSubcircuits, replacePatternWithChip, miningToText, markSubBlocks, adjacency, refineColours } from '../../src/engine/mining/index.js';
+import { mineSubcircuits, replacePatternWithChip, extractPatternAsChip, miningToText, markSubBlocks, adjacency, canonicalCone, refineColours } from '../../src/engine/mining/index.js';
 import type { PatternOccurrence, SubcircuitPattern } from '../../src/engine/mining/index.js';
 
 const project = buildReferenceProject('mining tests');
@@ -78,9 +82,15 @@ function fullAdderRows(): string[] {
   return rows;
 }
 
-/** Drive every input of a flattened circuit through its combinations and read the outputs. */
-function truthTable(circuit: Circuit, inputs: string[], outputs: string[], combinations: number): string[] {
-  const netlist = flatten(circuit, lib, chips, { metadata: true });
+/**
+ * Drive every input of a flattened circuit through its combinations and read the outputs.
+ *
+ * The libraries are parameters, not the module-level pair: an extracted chip is registered
+ * in whichever libraries the extraction was given, and flattening with any other pair
+ * cannot expand it — which shows up as a truth table of nothing but X.
+ */
+function truthTable(circuit: Circuit, inputs: string[], outputs: string[], combinations: number, from: { lib: Library; chips: typeof chips } = { lib, chips }): string[] {
+  const netlist = flatten(circuit, from.lib, from.chips, { metadata: true });
   const graph = buildLogicGraph(netlist);
   const sim = new LogicVectorSim(graph, { loopIterations: 8 });
   const nameToIndex = new Map<string, number>();
@@ -314,6 +324,10 @@ test('a near match is never substituted, and the report says how near', () => {
   const nearBehaviour = near.behaviour;
   assert(nearBehaviour !== null, 'the near-adder fragment was not measured');
   assertEqual(nearBehaviour.rows.join(' ') === fullAdderRows().join(' '), false, 'its measured rows differ from the full adder\'s');
+  const refused = replacePatternWithChip(circuit, lib, chips, near, { chipId: 'full_adder' });
+  assertEqual(refused.replaced, 0, 'an explicit chip id cannot bypass the measured identity check');
+  assertEqual(refused.componentsAfter, refused.componentsBefore, 'the near-match sheet is untouched');
+  assert(refused.notes.join(' ').includes('differs from the pattern'), `the refusal says what differs: ${refused.notes.join(' | ')}`);
 });
 
 test('a block contained in a larger reported block is labelled, not hidden', () => {
@@ -380,6 +394,253 @@ test('containment is decided occurrence by occurrence, not by shape', () => {
   markSubBlocks([twinA, twinB]);
   assertEqual(twinA.subBlockOf, undefined, 'two patterns of the same size label neither');
   assertEqual(twinB.subBlockOf, undefined, 'in either order');
+});
+
+// Extraction registers chips, so these cases run against a project of their own: a chip
+// added to the shared library would make a later "no chip computes this" assertion false.
+const extractProject = buildReferenceProject('mining extraction');
+const extractLib: Library = extractProject.lib;
+const extractChips = extractProject.chips;
+
+/** `n` copies of a block no library chip computes: the carry is (a AND x) OR ci. */
+function oddAdders(n: number): Circuit {
+  const b = new CircuitBuilder(extractLib, `odd_${n}`);
+  for (let i = 0; i < n; i++) {
+    for (const net of ['a', 'b', 'ci']) b.port(`${net}${i}`.toUpperCase(), 'input', `${net}${i}`, 1);
+    const x1 = b.add('xor_gate', { inputs: 2 }, [i * 240, 0]);
+    const x2 = b.add('xor_gate', { inputs: 2 }, [i * 240 + 60, 0]);
+    const a1 = b.add('and_gate', { inputs: 2 }, [i * 240, 60]);
+    const o1 = b.add('or_gate', { inputs: 2 }, [i * 240 + 120, 60]);
+    b.at(x1, 'IN1', `a${i}`, 1);
+    b.at(x1, 'IN2', `b${i}`, 1);
+    b.at(x1, 'OUT', `x_${i}`, 1);
+    b.at(x2, 'IN1', `x_${i}`, 1);
+    b.at(x2, 'IN2', `ci${i}`, 1);
+    b.at(x2, 'OUT', `s${i}`, 1);
+    b.at(a1, 'IN1', `a${i}`, 1);
+    b.at(a1, 'IN2', `x_${i}`, 1);
+    b.at(a1, 'OUT', `g${i}`, 1);
+    b.at(o1, 'IN1', `g${i}`, 1);
+    b.at(o1, 'IN2', `ci${i}`, 1);
+    b.at(o1, 'OUT', `co${i}`, 1);
+    b.port(`S${i}`, 'output', `s${i}`, 1);
+    b.port(`CO${i}`, 'output', `co${i}`, 1);
+  }
+  return b.finish({ erc: false });
+}
+
+/** Truth table of one block of a sheet, driven by net name. */
+function blockTruth(circuit: Circuit, suffix: string): string {
+  return truthTable(circuit, [`a${suffix}`, `b${suffix}`, `ci${suffix}`], [`s${suffix}`, `co${suffix}`], 8, { lib: extractLib, chips: extractChips }).join(' ');
+}
+
+test('a block no chip computes can be extracted into one, and the copy is verified', () => {
+  const circuit = oddAdders(4);
+  const report = mineSubcircuits(circuit, extractLib, extractChips, {});
+  const pattern = report.patterns[0];
+  assert(pattern !== undefined, 'the repeated block was found');
+  assert(pattern.matchedChip === null || !pattern.matchedChip.identical, 'and no library chip computes it, which is the point of extracting one');
+  assertEqual(pattern.count, 4, 'occurrences');
+
+  const before = blockTruth(circuit, '0');
+  const result = extractPatternAsChip(circuit, extractLib, extractChips, pattern, {});
+  assert(result.chip !== null, `the chip was created; notes say: ${result.notes.join(' | ')}`);
+  assertEqual(result.identical, true, 'the copy reproduces the pattern');
+  assertEqual(result.differingRows, 0, 'differing rows between the pattern and the copy');
+  const measured = result.measured;
+  assert(measured !== null, 'the copy was measured');
+  assertEqual(measured.rows.join(' '), pattern.behaviour?.rows.join(' '), 'row for row, in the pattern port order');
+  assertEqual(measured.complete, true, 'three inputs are enumerable, so the check is exhaustive');
+
+  const chip = result.chip!;
+  assertEqual(chip.def.ports.filter((pt) => pt.direction === 'input').length, 3, 'input ports');
+  assertEqual(chip.def.ports.filter((pt) => pt.direction === 'output').length, 2, 'output ports');
+  assert(extractChips.get(result.chipId) !== undefined, 'the chip is in the chip library, so it can be expanded');
+  const spec = extractLib.get(result.chipId);
+  assert(spec !== undefined, 'and in the component library, so it can be placed');
+  assertEqual(spec!.category, 'chip', 'as a chip instance, not a primitive');
+  assertEqual(chip.implementation({}).componentCount(), 4, 'its implementation holds the four components that were copied');
+
+  // The new chip is what the other occurrences are replaced with.
+  const replaced = replacePatternWithChip(circuit, extractLib, extractChips, pattern, { chipId: result.chipId });
+  assertEqual(replaced.replaced, 4, 'occurrences replaced with the extracted chip');
+  assertEqual(replaced.componentsBefore, 16, 'components before');
+  assertEqual(replaced.componentsAfter, 4, 'components after');
+  assertEqual(replaced.diagnostics.filter((d) => d.severity === 'error').length, 0, 'ERC errors after');
+  assertEqual(blockTruth(replaced.circuit, '0'), before, 'the block still computes what it computed');
+  assertEqual(blockTruth(replaced.circuit, '3'), blockTruth(circuit, '3'), 'and so does the last one');
+
+  // The extracted chip is a real project artefact, not an in-memory suggestion: the
+  // project format has to carry both it and the rewritten instances through a round trip.
+  const saved = saveProjectText(extractProject, { circuit: replaced.circuit, notes: 'extracted and replaced by the mining regression' });
+  const restored = loadProjectText(saved, { lib: createDefaultLibrary(), chips: new ChipLibrary() });
+  assertEqual(restored.errors, 0, 'the extracted chip and its rewired sheet reload without errors');
+  assert(restored.project.chips.get(result.chipId) !== undefined, 'the new chip survived project serialization');
+  assert(restored.project.lib.get(result.chipId) !== undefined, 'its component spec was rebuilt on load');
+  assert(restored.project.sheet !== undefined, 'the rewritten sheet survived project serialization');
+  assertEqual(blockTruth(restored.project.sheet!, '0'), before, 'and still computes the same thing when reloaded');
+});
+
+test('an id already taken is bumped, and the bump is reported', () => {
+  const circuit = flatAdders(2);
+  const report = mineSubcircuits(circuit, extractLib, extractChips, {});
+  const adder = matched(report.patterns, 'full_adder');
+  assert(adder !== undefined, 'the full adder was found');
+  const result = extractPatternAsChip(circuit, extractLib, extractChips, adder, {});
+  assert(result.chip !== null, `the chip was created; notes say: ${result.notes.join(' | ')}`);
+  assert(result.chipId !== 'full_adder', `"full_adder" is taken, so the extracted chip got another id (${result.chipId})`);
+  assert(result.notes.some((n) => /already used/.test(n)), 'and the renaming is reported, not silent');
+  assert(result.chip !== null, 'the extracted chip has a unique display name too');
+  assert(extractChips.get(result.chip.def.name) === result.chip, 'its display name does not shadow the existing full-adder chip');
+});
+
+test('shared chip registration refuses a component-id collision before touching either library', () => {
+  const circuit = new CircuitBuilder(extractLib, 'primitive collision', extractChips).finish({ erc: false });
+  const chip = makeChip({ id: 'xor_gate', name: 'A chip pretending to be XOR', circuit });
+  const originalSpec = extractLib.get('xor_gate');
+  const thrown = assertThrows(() => registerChip(extractLib, extractChips, chip), 'a chip cannot overwrite the built-in xor gate');
+  assertEqual((thrown as Error & { code?: string }).code, 'CF4005', 'the collision has an engine diagnostic code');
+  assert(extractLib.get('xor_gate') === originalSpec, 'the component spec remains the same object');
+  assertEqual(extractChips.get('xor_gate'), undefined, 'and the chip library was not partially updated');
+});
+
+test('extraction never replaces a primitive component spec with a same-named chip', () => {
+  const circuit = oddAdders(2);
+  const report = mineSubcircuits(circuit, extractLib, extractChips, {});
+  const pattern = report.patterns[0];
+  assert(pattern !== undefined, 'the repeated block was found');
+  const originalSpec = extractLib.get('xor_gate');
+  const result = extractPatternAsChip(circuit, extractLib, extractChips, pattern, { chipId: 'xor_gate', name: 'XOR Gate' });
+  assert(result.chip !== null, `the chip was safely renamed; notes say: ${result.notes.join(' | ')}`);
+  assert(result.chipId !== 'xor_gate', `the reserved component id was not reused (${result.chipId})`);
+  assert(extractLib.get('xor_gate') === originalSpec, 'the builtin XOR gate spec is untouched');
+  assertEqual(extractLib.get(result.chipId)?.category, 'chip', 'the new id refers to a chip instance');
+});
+
+test('extraction refuses a pattern that was not measured', () => {
+  const circuit = oddAdders(2);
+  const report = mineSubcircuits(circuit, extractLib, extractChips, { measure: false });
+  const pattern = report.patterns[0];
+  assert(pattern !== undefined, 'the block was found structurally');
+  assertEqual(pattern.behaviour, null, '--no-measure does not secretly measure in order to match a chip');
+  assertEqual(pattern.matchedChip, null, 'chip matching needs the measurement that was disabled');
+  const result = extractPatternAsChip(circuit, extractLib, extractChips, pattern, {});
+  assertEqual(result.chip, null, 'no chip is registered from an unverified copy');
+  const errors = result.diagnostics.filter((d) => d.severity === 'error');
+  assert(errors.length > 0, 'and the refusal is a diagnostic');
+  assert(/not measured/.test(errors[0].message), `the reason names the missing measurement: ${errors[0].message}`);
+  assert(typeof errors[0].hint === 'string' && errors[0].hint!.length > 20, 'with a hint saying what to do');
+  const replacement = replacePatternWithChip(circuit, extractLib, extractChips, pattern, { chipId: 'full_adder' });
+  assertEqual(replacement.replaced, 0, 'an explicit chip cannot make an unmeasured pattern safe to replace');
+  assert(replacement.notes.join(' ').includes('no exhaustive measured truth table'), `the refusal says why: ${replacement.notes.join(' | ')}`);
+});
+
+test('extraction refuses a partial table, even if the caller labels it measured', () => {
+  const circuit = oddAdders(2);
+  const report = mineSubcircuits(circuit, extractLib, extractChips, {});
+  const pattern = report.patterns[0];
+  assert(pattern?.behaviour?.measured, 'the source pattern was measured');
+  const partial: SubcircuitPattern = { ...pattern!, behaviour: { ...pattern!.behaviour!, complete: false } };
+  const before = extractChips.all().length;
+  const result = extractPatternAsChip(circuit, extractLib, extractChips, partial, {});
+  assertEqual(result.chip, null, 'a partial table cannot verify a new chip');
+  assert(/partial measurement/.test(result.notes.join(' ')), `the refusal explains why: ${result.notes.join(' | ')}`);
+  assertEqual(extractChips.all().length, before, 'no unverified chip was registered');
+});
+
+test('an invalid extraction occurrence index is refused without changing either library', () => {
+  const circuit = oddAdders(2);
+  const report = mineSubcircuits(circuit, extractLib, extractChips, {});
+  const pattern = report.patterns[0];
+  assert(pattern !== undefined, 'the repeated block was found');
+  const chipCount = extractChips.all().length;
+  const spec = extractLib.get('and_gate');
+  const result = extractPatternAsChip(circuit, extractLib, extractChips, pattern, { occurrence: -1, chipId: 'invalid_index_chip' });
+  assertEqual(result.chip, null, 'an invalid zero-based occurrence is not guessed');
+  assert(/outside this pattern/.test(result.notes.join(' ')), `the refusal says the index is invalid: ${result.notes.join(' | ')}`);
+  assertEqual(extractChips.all().length, chipCount, 'the chip library was not changed');
+  assert(extractLib.get('and_gate') === spec, 'the component library was not changed');
+});
+
+test('extraction refuses an occurrence that lives inside a chip expansion', () => {
+  const ripple = chipImpl('ripple_adder', { bits: 4 });
+  const report = mineSubcircuits(ripple, extractLib, extractChips, {});
+  const adder = matched(report.patterns, 'full_adder');
+  assert(adder !== undefined, 'the inner adders were seen');
+  const chipsBefore = extractChips.all().length;
+  const result = extractPatternAsChip(ripple, extractLib, extractChips, adder, {});
+  assertEqual(result.chip, null, 'nothing is extracted from another sheet\'s components');
+  assert(/chip expansion/.test(result.notes.join(' ')), `the refusal says where the occurrence lives: ${result.notes.join(' | ')}`);
+  assertEqual(extractChips.all().length, chipsBefore, 'and no chip was added');
+});
+
+test('cones with different sequential semantics are not grouped as one reusable chip', () => {
+  const b = new CircuitBuilder(extractLib, 'two different flip-flops', extractChips);
+  for (let i = 0; i < 2; i++) {
+    for (const net of ['d', 'clk', 'rst']) b.port(`${net}${i}`.toUpperCase(), 'input', `${net}${i}`, 1);
+    const dff = b.add('dff', { edge: i === 0 ? 'rising' : 'falling', resetActive: i === 0 ? 'high' : 'low', initial: '0' }, [i * 80, 0]);
+    b.at(dff, 'D', `d${i}`).at(dff, 'CLK', `clk${i}`).at(dff, 'RST', `rst${i}`);
+    b.at(dff, 'Q', `q${i}`).at(dff, 'QN', `qn${i}`);
+    b.port(`Q${i}`, 'output', `q${i}`, 1);
+    b.port(`QN${i}`, 'output', `qn${i}`, 1);
+  }
+  const circuit = b.finish({ erc: false });
+  const netlist = flatten(circuit, extractLib, extractChips, { expandGates: false, metadata: true });
+  const graph = buildLogicGraph(netlist);
+  const sequential = graph.elements.filter((element) => element.kind === 'dff');
+  assertEqual(sequential.length, 2, 'both registers are in the logic graph');
+  const adj = adjacency(graph);
+  const rising = canonicalCone(graph, adj, [sequential[0].index]);
+  const falling = canonicalCone(graph, adj, [sequential[1].index]);
+  assert(rising.key !== falling.key, 'clock edge and reset polarity are part of the block semantics');
+});
+
+test('a static level-0 snapshot cannot match, extract or replace a sequential chip', () => {
+  const seqProject = buildReferenceProject('sequential mining safety');
+  const seqLib = seqProject.lib;
+  const seqChips = seqProject.chips;
+  const makeSeqBlock = (name: string, edge: 'rising' | 'falling', suffix = ''): Circuit => {
+    const b = new CircuitBuilder(seqLib, name, seqChips);
+    for (const pin of ['d', 'clk', 'rst']) b.port(`${pin.toUpperCase()}${suffix}`, 'input', `${pin}${suffix}`, 1);
+    const dff = b.add('dff', { edge, resetActive: 'high', initial: '0' }, [0, 0]);
+    const inv = b.add('not_gate', {}, [60, 0]);
+    b.at(dff, 'D', `d${suffix}`).at(dff, 'CLK', `clk${suffix}`).at(dff, 'RST', `rst${suffix}`).at(dff, 'Q', `q${suffix}`).at(dff, 'QN', `qn${suffix}`);
+    b.at(inv, 'IN1', `q${suffix}`).at(inv, 'OUT', `y${suffix}`);
+    b.port(`Y${suffix}`, 'output', `y${suffix}`, 1);
+    return b.finish({ erc: false });
+  };
+  const sourceBuilder = new CircuitBuilder(seqLib, 'two rising-edge register blocks', seqChips);
+  for (let i = 0; i < 2; i++) {
+    for (const pin of ['d', 'clk', 'rst']) sourceBuilder.port(`${pin.toUpperCase()}${i}`, 'input', `${pin}${i}`, 1);
+    const dff = sourceBuilder.add('dff', { edge: 'rising', resetActive: 'high', initial: '0' }, [i * 120, 0]);
+    const inv = sourceBuilder.add('not_gate', {}, [i * 120 + 60, 0]);
+    sourceBuilder.at(dff, 'D', `d${i}`).at(dff, 'CLK', `clk${i}`).at(dff, 'RST', `rst${i}`).at(dff, 'Q', `q${i}`).at(dff, 'QN', `qn${i}`);
+    sourceBuilder.at(inv, 'IN1', `q${i}`).at(inv, 'OUT', `y${i}`);
+    sourceBuilder.port(`Y${i}`, 'output', `y${i}`, 1);
+  }
+  const circuit = sourceBuilder.finish({ erc: false });
+  const fallingBlock = makeChip({ id: 'falling_register_block', name: 'Falling register block', circuit: makeSeqBlock('falling-edge block', 'falling') });
+  registerChip(seqLib, seqChips, fallingBlock);
+
+  const report = mineSubcircuits(circuit, seqLib, seqChips, {});
+  const pattern = report.patterns.find((p) => p.kinds.includes('DFF') && p.kinds.includes('NOT'));
+  assert(pattern !== undefined, `the repeated sequential block remains visible: ${report.patterns.map((p) => p.description).join('; ')}`);
+  assertEqual(pattern!.behaviour?.measured, false, 'one settle is not called an exhaustive state-machine test');
+  assert(/clock transitions/.test(pattern!.behaviour?.reason ?? ''), `the reason explains what was not exercised: ${pattern!.behaviour?.reason}`);
+  assertEqual(pattern!.matchedChip, null, 'the falling-edge implementation is not matched on its identical power-on snapshot');
+
+  const extraction = extractPatternAsChip(circuit, seqLib, seqChips, pattern!, {});
+  assertEqual(extraction.chip, null, 'the unmeasured sequential block is not registered as a verified chip');
+  assert(/not measured/.test(extraction.notes.join(' ')), 'the extraction refusal is explicit');
+
+  // Even a caller-supplied static table cannot bypass chip-side state detection.
+  const claimedSnapshot: SubcircuitPattern = {
+    ...pattern!,
+    behaviour: { inputs: pattern!.inputs, outputs: pattern!.outputs, rows: Array(8).fill('1'), complete: true, lanes: 8, measured: true },
+  };
+  const replacement = replacePatternWithChip(circuit, seqLib, seqChips, claimedSnapshot, { chipId: fallingBlock.def.id });
+  assertEqual(replacement.replaced, 0, 'a sequential replacement candidate cannot pass on a static snapshot');
+  assertEqual(replacement.componentsAfter, replacement.componentsBefore, 'the source sheet stays untouched');
 });
 
 test('colour refinement is what makes two cones comparable, and it is stable', () => {

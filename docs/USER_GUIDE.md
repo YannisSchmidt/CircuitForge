@@ -123,10 +123,13 @@ it computes (a truth table measured at level 0, and whether the measurement was 
 and which library chip computes the same thing. **Replace with…** is enabled only when the
 match is identical on every measured row and at least one occurrence is on this sheet; a block
 that differs from a chip is shown with the number of rows that differ and cannot be
-substituted, because substituting it would change what the circuit computes. A block contained
-in a larger reported block is labelled *sub-block of* — a full adder really does contain two
-half adders, and replacing the smaller one first would break the larger. Replacement is an
-edit, so `Ctrl+Z` gives the sheet back.
+substituted, because substituting it would change what the circuit computes. If no chip exists,
+**Save as new chip** copies one occurrence, promotes its boundary nets to ports, checks ERC, and
+measures the copy again. The chip is registered only if all truth-table rows agree; it then
+appears in the Chips palette and a fresh search offers replacement. Save the project to keep it.
+A block contained in a larger reported block is labelled *sub-block of* — a full adder really
+does contain two half adders, and replacing the smaller one first would break the larger.
+Replacement is an edit, so `Ctrl+Z` gives the sheet back.
 
 The search describes the sheet as it was when it ran. Edit the sheet afterwards and the
 patterns are stale — the interface refuses to replace from a stale search and asks you to run

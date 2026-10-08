@@ -67,6 +67,8 @@ bound when the elements declare no delay.
 circuitforge mine --chip ripple_adder --param bits=8     # what does this design repeat?
 circuitforge mine --file sheet.cfproj                    # the same, for a saved sheet
 circuitforge mine --file sheet.cfproj --replace --out rewritten.json
+circuitforge mine --file sheet.cfproj --extract --out reusable.cfproj
+circuitforge mine --file sheet.cfproj --extract --replace --out compact.cfproj
 circuitforge mine --example alu --min 4 --max-inputs 4 --json
 ```
 
@@ -75,7 +77,13 @@ occurrences are on this sheet, its measured truth table, and the library chip th
 same thing — `IDENTICAL` when every measured row agrees, or the number of rows that differ.
 `--replace` substitutes the identical matches and, with `--out`, writes the rewritten sheet as a
 circuit document; occurrences inside a chip expansion are skipped with the reason, because they
-belong to another sheet. A near match is never substituted.
+belong to another sheet. A near match is never substituted. `--extract` copies one on-sheet
+occurrence to a new chip, promotes its boundary nets to ports, checks ERC, and exhaustively
+re-measures the copy **before** registering it. With `--out`, it writes a full `.cfproj` containing
+the chip and the original sheet; combining `--extract --replace --out` stores both the new chip
+and the rewritten sheet in that project. The extracted chip is fixed (its component parameters
+are not guessed into a new parameter schema). `--json` outputs the report, measurements,
+`ChipDocument` and implementation instead of writing a project file.
 
 | Flag | Meaning |
 |---|---|
@@ -84,10 +92,17 @@ belong to another sheet. A near match is never substituted.
 | `--max-inputs N` | widest cone to consider, in external inputs (5) |
 | `--max-size N` | most elements in one block (12) |
 | `--max N` | cap on blocks reported, best first (24) |
-| `--pattern ID` | which block `--replace` acts on |
-| `--chip ID` | instantiate this chip instead of the matched one |
+| `--pattern ID` | which block `--replace` or `--extract` acts on |
+| `--extract` | create and register a verified fixed chip from one on-sheet occurrence |
+| `--name NAME` | display name for the extracted chip |
+| `--occurrence N` | choose a zero-based occurrence to copy (default: first on this sheet) |
+| `--chip ID` | select a chip implementation as the circuit to mine |
+| `--as-chip ID` | id for the newly extracted chip |
+| `--replace-with ID` | choose an existing replacement chip; it must still match the pattern row for row |
 | `--limit N` | replace at most N occurrences |
-| `--no-measure`, `--no-match` | skip the measurement, or skip comparing with the library |
+| `--out FILE` | write a circuit document for replacement, or a full project when extracting |
+| `--no-measure` | skip truth-table measurement and therefore chip matching (a match is measured behaviour) |
+| `--no-match` | measure the table, but skip comparing it with the chip library |
 
 ## Validate
 

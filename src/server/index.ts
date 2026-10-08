@@ -640,12 +640,16 @@ function buildRoutes(): Route[] {
    *
    * The report is the engine's own, unchanged: what each block looks like, how many
    * times it occurs, what it computes (measured, not assumed), and which library chip
-   * computes the same thing. With `replace: true` the identical matches are substituted
-   * and the answer carries the rewritten circuit document, how many occurrences were
-   * replaced, and every one that was skipped with the reason — an occurrence inside a
-   * chip expansion belongs to another sheet and is never edited from here. A *near*
-   * match is reported with the number of rows that differ and is never substituted:
-   * asking to replace one is a 409, not a silent approximation.
+   * computes the same thing. With `extract: true`, one on-sheet occurrence is copied to
+   * a new chip, re-measured exhaustively, and returned both as a `ChipDocument` and as
+   * its implementation document; it is registered in the libraries for this request,
+   * not in a server-side project. With `replace: true` the identical matches are
+   * substituted and the answer carries the rewritten circuit document, how many
+   * occurrences were replaced, and every one that was skipped with the reason — an
+   * occurrence inside a chip expansion belongs to another sheet and is never edited
+   * from here. `extract: true, replace: true` does both in one request. A *near* match
+   * is reported with the number of rows that differ and is never substituted: asking
+   * to replace one is a 409, not a silent approximation.
    */
   post('/api/mine', (ctx) => {
     const body = ctx.body;
@@ -678,7 +682,29 @@ function buildRoutes(): Route[] {
             ch: unknown,
             pattern: unknown,
             o: Record<string, unknown>,
-          ) => Record<string, unknown> & { circuit: unknown; replaced: number; skipped: Array<{ occurrence: number; reason: string }> };
+          ) => Record<string, unknown> & {
+            circuit: unknown;
+            replaced: number;
+            skipped: Array<{ occurrence: number; reason: string }>;
+            notes: string[];
+            diagnostics: Array<Record<string, unknown>>;
+          };
+          extractPatternAsChip: (
+            c: unknown,
+            l: unknown,
+            ch: unknown,
+            pattern: unknown,
+            o: Record<string, unknown>,
+          ) => Record<string, unknown> & {
+            chipId: string;
+            chip: { def: { id: string; name: string; version: string; ports: Array<{ name: string; direction: string; width: number }> } } | null;
+            implementation: unknown;
+            identical: boolean;
+            differingRows: number;
+            measured: { rows: string[]; complete: boolean } | null;
+            diagnostics: Array<Record<string, unknown>>;
+            notes: string[];
+          };
         }
       | undefined;
     if (!mining) {
@@ -696,22 +722,82 @@ function buildRoutes(): Route[] {
     });
 
     const out: Record<string, unknown> = { report };
+    const toDocument = e.circuitToDocument as ((c: unknown) => unknown) | undefined;
+    const wanted = typeof body.pattern === 'string' && body.pattern.length > 0 ? body.pattern : undefined;
+    const named = wanted ? report.patterns.find((p) => p.id === wanted) : undefined;
+    if (wanted && !named) {
+      throw httpError(404, 'CF404', `this report has no pattern with id "${wanted}"`, 'The report lists every pattern with its id in square brackets.');
+    }
+
+    // Extract first: a chip built from one occurrence is what the replacement then uses,
+    // and it is registered in both libraries, so the same request can do both.
+    let extracted: { patternId: string; chipId: string } | null = null;
+    if (body.extract === true) {
+      const pattern = named ?? report.patterns.find((p) => p.saving.replaceable > 0) ?? report.patterns[0];
+      if (!pattern) throw httpError(409, 'CF409', 'this report has no pattern to extract', 'Mine a sheet that repeats something first.');
+      const result = mining.extractPatternAsChip(circuit, lib, chips, pattern, {
+        chipId: typeof body.chip === 'string' && body.chip.length > 0 ? body.chip : undefined,
+        name: typeof body.name === 'string' && body.name.length > 0 ? body.name : undefined,
+        occurrence: typeof body.occurrence === 'number' && Number.isFinite(body.occurrence) ? Math.max(0, Math.round(body.occurrence)) : undefined,
+      });
+      if (!result.chip) {
+        // The refusal is the engine's own, with its reason and its hint: an extraction
+        // that was not verified is not a chip, and the answer says why.
+        const why = result.diagnostics.find((d) => d.severity === 'error');
+        throw httpError(
+          409,
+          'CF409',
+          `the pattern was not extracted: ${String((why as Record<string, unknown> | undefined)?.message ?? 'unknown reason')}`,
+          String((why as Record<string, unknown> | undefined)?.hint ?? 'See the notes in the response.'),
+        );
+      }
+      extracted = { patternId: pattern.id, chipId: result.chipId };
+      const chipToDocument = e.chipToDocument as ((chip: unknown) => unknown) | undefined;
+      out.extraction = {
+        patternId: pattern.id,
+        description: pattern.description,
+        chipId: result.chipId,
+        name: result.chip.def.name,
+        version: result.chip.def.version,
+        ports: result.chip.def.ports,
+        identical: result.identical,
+        differingRows: result.differingRows,
+        measuredRows: result.measured ? result.measured.rows : null,
+        complete: result.measured ? result.measured.complete : null,
+        diagnostics: result.diagnostics,
+        notes: result.notes,
+        chip: chipToDocument ? chipToDocument(result.chip) : null,
+        implementation: toDocument ? toDocument(result.implementation) : null,
+      };
+    }
+
     if (body.replace === true) {
-      const wanted = typeof body.pattern === 'string' && body.pattern.length > 0 ? body.pattern : undefined;
-      const pattern = wanted ? report.patterns.find((p) => p.id === wanted) : report.patterns.find((p) => p.matchedChip?.identical === true);
+      const pattern =
+        named ??
+        (extracted ? report.patterns.find((p) => p.id === extracted!.patternId) : undefined) ??
+        report.patterns.find((p) => p.matchedChip?.identical === true);
       if (!pattern) {
         throw httpError(
           409,
           'CF409',
-          wanted ? `this report has no pattern with id "${wanted}"` : 'no pattern in this sheet matched a library chip identically, so there is nothing to substitute',
-          'A near match is reported with the number of truth-table rows that differ, and is never replaced automatically: save it as a new chip instead.',
+          'no pattern in this sheet matched a library chip identically, so there is nothing to substitute',
+          'A near match is reported with the number of truth-table rows that differ and is never replaced automatically: pass extract: true to build the chip first.',
         );
       }
       const result = mining.replacePatternWithChip(circuit, lib, chips, pattern, {
-        chipId: typeof body.chip === 'string' && body.chip.length > 0 ? body.chip : undefined,
+        chipId: typeof body.chip === 'string' && body.chip.length > 0 ? body.chip : extracted?.chipId,
         limit: typeof body.limit === 'number' && Number.isFinite(body.limit) ? Math.max(0, Math.round(body.limit)) : undefined,
       });
-      const toDocument = e.circuitToDocument as ((c: unknown) => unknown) | undefined;
+      if (result.replaced === 0 && result.notes[0]?.startsWith('nothing was replaced:')) {
+        throw httpError(
+          409,
+          'CF409',
+          result.notes[0].replace(/^nothing was replaced: /, '').replace(/\.$/, ''),
+          typeof result.diagnostics[0]?.hint === 'string'
+            ? result.diagnostics[0].hint
+            : 'A chip is substituted only after its exhaustive level-0 truth table matches the pattern, row for row. A near match is never replaced.',
+        );
+      }
       out.replacement = {
         patternId: pattern.id,
         description: pattern.description,
@@ -732,14 +818,17 @@ function buildRoutes(): Route[] {
 
   post('/api/validate', (ctx) => {
     const body = ctx.body;
-    const lib = defaultLibrary(ctx);
-    const chips = chipLibraryOf(ctx, body);
+    const { lib, chips } = libraryPair(ctx, body);
     let chip: unknown;
     if (typeof body.chip === 'string') {
       chip = (chips as { get(id: string): unknown }).get(body.chip);
       if (!chip) throw httpError(404, 'CF404', `no chip named "${body.chip}" in the project`);
     } else if (body.chip && typeof body.chip === 'object') {
-      chip = body.chip;
+      const raw = body.chip as Record<string, unknown>;
+      const def = (raw.def ?? raw) as Record<string, unknown>;
+      const id = String(def.id ?? raw.id ?? '');
+      chip = (chips as { get(id: string): unknown }).get(id);
+      if (!chip) throw httpError(400, 'CF400', `the chip document "${id || '(without id)'}" could not be loaded`, 'Send a valid ChipDocument and include its dependencies in the chips array.');
     } else {
       const { circuit } = circuitFromBody(ctx);
       chip = { id: 'adhoc', name: 'Ad hoc', version: '1.0.0', description: 'validated from a document', ports: [], params: [], implementation: () => circuit };
@@ -751,8 +840,7 @@ function buildRoutes(): Route[] {
 
   post('/api/optimize', (ctx) => {
     const body = ctx.body;
-    const lib = defaultLibrary(ctx);
-    const chips = chipLibraryOf(ctx, body);
+    const { lib, chips } = libraryPair(ctx, body);
     const buildSpecById = ctx.engine.buildSpecById as (id: string, params?: Record<string, unknown>) => Record<string, unknown>;
     const specId = String(body.spec ?? 'and_not');
     const spec = buildSpecById(specId, (body.params ?? {}) as Record<string, unknown>);
@@ -798,8 +886,7 @@ function buildRoutes(): Route[] {
     // optimized implementation, a validation report and a saved chip. The same path
     // the CLI's `synth` verb takes, so a GUI result and a CLI result agree.
     const body = ctx.body;
-    const lib = defaultLibrary(ctx);
-    const chips = chipLibraryOf(ctx, body);
+    const { lib, chips } = libraryPair(ctx, body);
     const buildSpecById = ctx.engine.buildSpecById as (id: string, params?: Record<string, unknown>) => Record<string, unknown>;
     const specId = String(body.spec ?? 'mux');
     const spec = buildSpecById(specId, (body.params ?? {}) as Record<string, unknown>);
@@ -838,7 +925,7 @@ function buildRoutes(): Route[] {
           validation = { error: errorBody(err).error };
         }
       }
-      return { report: opt.report(), why: opt.why(), chip, validation, project: chip ? projectToDocument(chipsProjectOf(ctx, chips)) : null };
+      return { report: opt.report(), why: opt.why(), chip, validation, project: chip ? projectToDocument(chipsProjectOf(ctx, lib, chips)) : null };
     }
   });
 
@@ -1010,21 +1097,9 @@ function defaultLibrary(ctx: RequestContext): unknown {
 
 /** The chip library a request should work against: the reference project, unless the
  * request carries its own chips. */
-function chipLibraryOf(ctx: RequestContext, body: Record<string, unknown>): unknown {
-  const e = ctx.engine;
-  if (Array.isArray(body.chips) && body.chips.length > 0) {
-    const ChipLibrary = e.ChipLibrary as new () => { add(chip: unknown): unknown };
-    const lib = new ChipLibrary();
-    for (const chip of body.chips) lib.add(chip);
-    return lib;
-  }
-  const build = e.buildReferenceProject as (name: string) => { chips: unknown };
-  return build('server').chips;
-}
-
-function chipsProjectOf(ctx: RequestContext, chips: unknown): unknown {
+function chipsProjectOf(ctx: RequestContext, lib: unknown, chips: unknown): unknown {
   const Project = ctx.engine.Project as new (name: string, lib: unknown, chips: unknown) => unknown;
-  return new Project('server', defaultLibrary(ctx), chips);
+  return new Project('server', lib, chips);
 }
 
 function budgetOf(body: Record<string, unknown>): Record<string, unknown> {
@@ -1049,30 +1124,56 @@ function budgetOf(body: Record<string, unknown>): Record<string, unknown> {
  */
 function libraryPair(ctx: RequestContext, body: Record<string, unknown>): { lib: unknown; chips: unknown } {
   const e = ctx.engine;
-  const build = e.buildReferenceProject as (name: string) => { lib: unknown; chips: unknown };
-  if (Array.isArray(body.chips) && body.chips.length > 0) {
-    const ChipLibrary = e.ChipLibrary as new () => { add(chip: unknown): unknown };
-    const chips = new ChipLibrary();
-    for (const chip of body.chips) chips.add(chip);
-    const lib = defaultLibrary(ctx) as {
-      register(spec: unknown): void;
-      get(id: string): unknown;
-    };
-    const chipSpec = e.chipSpec as
-      | ((chipId: string, name: string, description: string, ports: readonly unknown[], params?: unknown) => unknown)
-      | undefined;
-    if (chipSpec) {
-      for (const raw of body.chips as Array<Record<string, unknown>>) {
-        const def = (raw.def ?? raw) as Record<string, unknown>;
-        const id = String(def.id ?? raw.id ?? '');
-        if (!id || lib.get(id)) continue;
-        lib.register(chipSpec(id, String(def.name ?? id), String(def.description ?? ''), (def.ports ?? []) as unknown[], def.params ?? []));
-      }
-    }
-    return { lib, chips };
+  const supplied = Array.isArray(body.chips) ? [...body.chips] : [];
+  // `/api/validate` accepts one chip document as `chip`; all the other APIs accept a
+  // library as `chips`. Normalize both shapes before deserializing. JSON cannot carry a
+  // Chip instance's methods, so never `add()` raw request objects to ChipLibrary.
+  if (body.chip && typeof body.chip === 'object') {
+    const single = body.chip as Record<string, unknown>;
+    const def = (single.def ?? single) as Record<string, unknown>;
+    const id = String(def.id ?? single.id ?? '');
+    if (id && !supplied.some((item) => {
+      if (!item || typeof item !== 'object') return false;
+      const raw = item as Record<string, unknown>;
+      const itemDef = (raw.def ?? raw) as Record<string, unknown>;
+      return String(itemDef.id ?? raw.id ?? '') === id;
+    })) supplied.push(single);
   }
-  const project = build('server');
-  return { lib: project.lib, chips: project.chips };
+
+  if (supplied.length === 0) {
+    const build = e.buildReferenceProject as (name: string) => { lib: unknown; chips: unknown };
+    const project = build('server');
+    return { lib: project.lib, chips: project.chips };
+  }
+
+  // A ChipDocument is data, not a runtime Chip. Load the list through the same
+  // dependency-aware deserializer used by project files: it rebuilds implementations,
+  // registers each chip's ComponentSpec, respects dependency order, and diagnoses bad
+  // or incomplete documents. Hand-building specs and stuffing plain JSON into a
+  // ChipLibrary made hierarchy expansion fail later with "chip.key is not a function".
+  const loadProject = e.loadProjectText as
+    | ((text: string, options: { lib: unknown; name: string }) => {
+        project: { lib: unknown; chips: unknown };
+        errors: number;
+        diagnostics: Array<{ severity: string; code?: string; message: string; hint?: string }>;
+      })
+    | undefined;
+  if (!loadProject) throw httpError(501, 'CF501', 'the engine cannot load chip documents', 'Use the matching CircuitForge engine build.');
+  const projectFormat = String(e.PROJECT_FORMAT ?? 'circuitforge.project');
+  const schemaVersion = Number(e.SCHEMA_VERSION ?? 1);
+  const engineVersion = String(e.VERSION ?? 'unknown');
+  const document = JSON.stringify({ format: projectFormat, version: schemaVersion, engine: engineVersion, name: 'API chip library', chips: supplied });
+  const loaded = loadProject(document, { lib: defaultLibrary(ctx), name: 'API chip library' });
+  if (loaded.errors > 0) {
+    const first = loaded.diagnostics.find((d) => d.severity === 'error');
+    throw httpError(
+      400,
+      'CF400',
+      `the request's chip library has ${loaded.errors} error(s)${first ? `: ${first.code ?? 'CF'} ${first.message}` : ''}`,
+      first?.hint ?? 'Supply valid ChipDocument entries, including every custom chip they depend on.',
+    );
+  }
+  return { lib: loaded.project.lib, chips: loaded.project.chips };
 }
 
 function circuitFromBody(ctx: RequestContext): { circuit: unknown; lib: unknown; chips: unknown } {

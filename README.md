@@ -44,13 +44,15 @@ produced it named, unused components, redundant connections, combinational loops
 fan-out, slow/hot/power-hungry zones, constraint violations — as coded diagnostics
 (`CF3001`…`CF9002`), not prose.
 
-**Find what a design repeats.** Fan-in cones are grown over the flattened logic, grouped
-by a canonical form, and each block's truth table is *measured* at level 0 and compared
-row by row with the chip library. A block that matches a chip on every row can be
-replaced by an instance of it; one that differs is reported with the number of rows that
-differ and is never substituted. On a flat sheet of 184 full adders built from gates that
-is one five-element block with 184 occurrences, all 184 replaced, 920 components becoming
-184, with every output checked to compute what it computed before.
+**Find — or make — the chip a design repeats.** Fan-in cones are grown over the flattened
+logic and described by cone-local colour refinement; each combinational block's truth table
+is *measured* at level 0 and compared row by row with the chip library. A block that matches
+on every row can be replaced by an instance of it; a near match is reported, never substituted.
+A block nobody has written as a chip can be extracted from one on-sheet occurrence, copied,
+and re-measured exhaustively before registration in both libraries. DFF/latch patterns remain
+visible but are not measured or substituted until a clocked equivalence check exists. On a flat
+sheet of 184 full adders built from gates, one five-element block has 184 occurrences: 920
+components become 184, with every output checked to compute what it computed before.
 
 **Synthesize and optimize.** A behavioural specification (for example `A[7:0]`,
 `B[7:0]` → `Y = A + B`) becomes architectures from a template catalogue, then a seeded
@@ -113,7 +115,7 @@ bin/circuitforge.js    the CLI: help, doctor, list, examples, simulate, analyze,
 src/engine/core/       circuit graph, library, chips, projects, diagnostics
 src/engine/sim/        flattener (SoA netlist), MNA solver, transient, thermal
 src/engine/analysis/   logic vector engine, timing, statistics, analyzer
-src/engine/mining/     repeated subcircuits, chip matching by measured behaviour, replacement
+src/engine/mining/     repeated subcircuits, measured matching, verified chip extraction
 src/engine/instruments/ fft, spectrum, oscilloscope, meters, signal generator
 src/engine/optim/      specs, genomes, cost, tiered search, NSGA-II, explanations
 src/engine/validate/   the validation pipeline
@@ -126,7 +128,7 @@ src/engine/synthesis/  the 19 reference designs and 24 worked examples
 src/server/            HTTP server and JSON API behind the editor
 src/ui/                the editor state machine and the command registry
 public/                the interface: HTML, CSS and five ES modules
-tests/                 368 tests: unit, integration, simulation, io, export,
+tests/                 380 tests: unit, integration, simulation, io, export,
                        analysis, mining, validation, jobs, optimizer, instruments,
                        render, editor, server, benchmarks, scale
 docs/                  the twelve documents listed below
@@ -181,7 +183,7 @@ reproduces these; the report states the environment it ran in.
 | Sheet layout | 5.5 k–8.4 k blocks/s |
 | Draw pass | 578 k–702 k drawing operations/s |
 | Optimizer | ~1 k candidate evaluations/s |
-| Repeated-subcircuit mining | 184 gate-level adders in 155 ms; a 375-element CPU in 197 ms |
+| Repeated-subcircuit mining | 184 gate-level adders in 155 ms; new chips extracted and re-measured before registration |
 
 A million-component sheet is **refused** in this environment, with the reason: roughly
 8.75 GiB of heap against a 1.91 GiB V8 limit at a measured marginal cost of 4.6 KiB
@@ -193,7 +195,7 @@ cost was flat across every size that ran — and the report says how to raise it
 ## Tests
 
 ```bash
-npm test        # 368 tests, about 15 s
+npm test        # 380 tests, about 16 s
 ```
 
 Unit, integration, simulation, regression, serialization, export/import, randomized,

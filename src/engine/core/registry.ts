@@ -13,7 +13,8 @@ import { Library as LibraryClass, defaultParams } from './library.js';
 import { BASE_SPECS } from './primitives.js';
 import { DIGITAL_SPECS } from './primitives-digital.js';
 import { SEMI_SPECS } from './primitives-semi.js';
-import type { ChipPort } from './chip.js';
+import type { Chip, ChipPort } from './chip.js';
+import { fail } from './labels.js';
 
 /** All built-in specs, in palette order. */
 export function builtinSpecs(): ComponentSpec[] {
@@ -207,4 +208,50 @@ export function applyPreset(spec: ComponentSpec, params: ParamBag, touched: read
 /** Full default parameter bag for a spec, including the variant preset. */
 export function specDefaults(spec: ComponentSpec): ParamBag {
   return applyPreset(spec, defaultParams(spec));
+}
+
+/**
+ * Register a chip so that every part of the engine agrees it exists.
+ *
+ * Two libraries have to be told, and forgetting either fails quietly somewhere else: a
+ * chip present only in the `ChipLibrary` is invisible to the netlist flattener and to the
+ * editor's palette, and a component spec present only in the `Library` cannot be expanded
+ * into an implementation. `Project.addChip` and the miner's pattern extraction both come
+ * through here, so the ritual cannot drift into two versions.
+ */
+export function registerChip(
+  lib: Library,
+  chips: { add(chip: Chip): void; get(idOrKey: string): Chip | undefined },
+  chip: Chip,
+): Chip {
+  const id = chip.def.id;
+  const previous = chips.get(id);
+  const replacesSameChip = previous?.def.id === id;
+  if (previous && !replacesSameChip) {
+    fail('CF4005', `chip id "${id}" is already used by another chip name`, {
+      hint: 'Choose a unique id. Re-registering the same chip id to save a new version is allowed.',
+    });
+  }
+  const existingSpec = lib.get(id);
+  if (existingSpec && existingSpec.category !== 'chip' && !replacesSameChip) {
+    fail('CF4005', `chip id "${id}" is already used by component "${existingSpec.name}"`, {
+      hint: 'Choose a different chip id so registering it cannot replace a built-in or plugin component.',
+    });
+  }
+
+  const spec = chipSpec(chip.def.id, chip.def.name, chip.def.description, chip.def.ports, chip.def.params, {
+    width: Math.max(5, 3 + 0.5 * Math.max(chip.def.name.length, 6)),
+    keywords: chip.def.tags,
+  });
+  // The `chip` category is what keeps the flattener, the ERC and the interface agreeing
+  // that this spec is an instance of something, not a primitive.
+  spec.category = 'chip';
+  spec.support = { ...spec.support, expandable: true, lowersTo: [chip.def.id.toUpperCase()] };
+
+  // Build and validate everything before touching either registry. From here on, the
+  // library operation is a single map update and ChipLibrary.add cannot fail.
+  if (lib.has(id)) lib.override(spec);
+  else lib.register(spec);
+  chips.add(chip);
+  return chip;
 }

@@ -24,7 +24,7 @@ import {
   type ChipDefinition,
   type ChipPort,
 } from './chip.js';
-import { chipSpec, createDefaultLibrary } from './registry.js';
+import { createDefaultLibrary, registerChip } from './registry.js';
 import type { Library, ParamBag, ComponentSpec } from './library.js';
 import { error, fail, info, type Diagnostic } from './labels.js';
 import { CircuitBuilder } from './build.js';
@@ -73,22 +73,9 @@ export class Project {
 
   /** Register a chip: implementation + component spec, atomically. */
   addChip(chip: Chip): Chip {
-    this.chips.add(chip);
-    const spec = chipSpec(
-      chip.def.id,
-      chip.def.name,
-      chip.def.description,
-      chip.def.ports,
-      chip.def.params,
-      { width: Math.max(5, 3 + 0.5 * Math.max(chip.def.name.length, 6)), keywords: chip.def.tags },
-    );
-    // `chip` category keeps the flattener, the ERC and the UI agreeing that this
-    // spec is an instance, not a primitive.
-    spec.category = 'chip';
-    spec.support = { ...spec.support, expandable: true, lowersTo: [chip.def.id.toUpperCase()] };
-    if (this.lib.has(chip.def.id)) this.lib.override(spec);
-    else this.lib.register(spec);
-    return chip;
+    // One ritual for registering a chip, shared with the miner's extraction: see
+    // `registerChip`, which explains why both libraries have to be told.
+    return registerChip(this.lib, this.chips, chip);
   }
 
   /** Instantiate a chip inside a builder. */

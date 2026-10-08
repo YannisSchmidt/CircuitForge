@@ -4,7 +4,7 @@
 
 The Python prototype that this repository started as is retired: it is removed from the tree,
 and the program is now a TypeScript engine with a browser interface and a headless CLI. Every
-entry below is implemented and covered by the 368-test suite.
+entry below is implemented and covered by the 380-test suite.
 
 ### Engine
 
@@ -26,6 +26,13 @@ entry below is implemented and covered by the 368-test suite.
   a signal generator with presets, meters.
 - Analysis: timing with named models, statistics per instance and per type, an analyzer
   producing coded findings, zones and constraints, and a text summary.
+- Pattern mining: cone-local structural matching, measured chip identification and safe bulk
+  replacement; when no chip exists, `extractPatternAsChip` copies one occurrence, promotes its
+  boundary nets to ports, checks ERC, re-measures the complete truth table, and only then registers
+  a fixed chip in both libraries. CLI, HTTP API and Analysis dock support extraction; the CLI can
+  save the new chip and source or rewritten sheet together as a full project file. DFF/latch
+  patterns remain structural-only until the miner can exercise clock transitions and prove state
+  equivalence; a static power-on snapshot is never treated as a verified match.
 - Validation pipeline: logic (exhaustive where the input space allows), electrical, timing,
   thermal, power, edge cases, seeded random vectors, stability — with pass/fail/skip counts and
   the accuracy classes of the models used.
@@ -80,10 +87,16 @@ entry below is implemented and covered by the 368-test suite.
 - A benchmark case described itself as measuring "gates expanded to their declared
   implementation" while the circuit it built had no gate that could expand; it now reports the
   transistor count it actually produced.
+- Chip registration was duplicated between the `Project` and the miner. It now goes through one
+  helper that updates both libraries, refuses a component-id collision before mutating either,
+  and replaces an existing chip only by its own id. Extraction chooses an unused id and display
+  name (reporting any suffix) instead of replacing a primitive spec or shadowing an existing chip.
 - The server answered a document-only request with a default component library and the reference
   chip library, a pair that does not know each other, so anything that needed to *place* a chip
-  (mining's replacement among them) refused with "the library has no component spec". Library and
-  chips are now built as a pair.
+  (mining's replacement among them) refused with "the library has no component spec". It also
+  added incoming JSON `ChipDocument`s directly to `ChipLibrary`, which only accepts runtime
+  `Chip`s. Requests now build or deserialize a synchronized library pair through the same
+  dependency-aware project loader used for saved projects.
 - Mining's canonical form used globally refined colours, so each stage of a ripple chain had a
   different neighbourhood and an eight-bit adder reported eight patterns of one occurrence instead
   of one pattern of eight; cones that left the block through a *port* did not count that as an
@@ -91,6 +104,14 @@ entry below is implemented and covered by the 368-test suite.
   budget pruning cut the data path before the carry chain; a single-gate cone was rejected before
   merging, which is why an XOR and an AND over the same two nets were never seen as the half adder
   they are; and `minOccurrences: 1` was silently clamped to 2.
+- `--no-measure` still measured every pattern whenever the default chip-matching flag was on.
+  Matching now depends on measurement explicitly, and disabling it cannot quietly simulate a
+  truth table just to produce an `IDENTICAL` label. The 32-lane L0 limit also caps exhaustive
+  measurement at five inputs instead of letting a wider request wrap a 32-bit truth table.
+- The cone signature treated every D flip-flop as the same function, even if one was rising-edge
+  with an active-high reset and the other falling-edge with active-low reset. It now includes
+  state-element semantics and declared timing values in the colour seed; those blocks do not get
+  grouped into a replacement that can change their declared behaviour.
 - Three quadratic scans in sheet construction (reference allocation, pin rewiring, empty-net
   pruning): building 10 000 components went from 22.62 s to 79 ms, and the per-component cost
   is now flat from 10 to 100 000.
